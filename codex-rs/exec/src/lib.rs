@@ -20,6 +20,8 @@ use codex_core::protocol::SandboxPolicy;
 use codex_core::protocol::TaskCompleteEvent;
 use codex_core::util::is_inside_git_repo;
 use event_processor::EventProcessor;
+#[cfg(feature = "otel")]
+use codex_common::telemetry;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -38,7 +40,29 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         last_message_file,
         prompt,
         config_overrides,
+        #[cfg(feature = "otel")]
+        otel,
+        #[cfg(feature = "otel")]
+        otel_protocol,
+        #[cfg(feature = "otel")]
+        otel_sample_rate,
+        #[cfg(feature = "otel")]
+        otel_service_name,
     } = cli;
+
+    #[cfg(feature = "otel")]
+    telemetry::init_telemetry(telemetry::OtelConfig {
+        target: otel,
+        protocol: Some(format!("{}", otel_protocol.as_str())),
+        sample_rate: Some(otel_sample_rate),
+        service_name: otel_service_name,
+    });
+    
+    #[cfg(not(feature = "otel"))]
+    {
+        // Initialize basic tracing without OpenTelemetry
+        let _ = tracing_subscriber::fmt().try_init();
+    }
 
     // Determine the prompt based on CLI arg and/or stdin.
     let prompt = match prompt {
@@ -114,6 +138,50 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     };
 
     let config = Config::load_with_cli_overrides(cli_kv_overrides, overrides)?;
+
+    let git_commit = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(&config.cwd)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let flags = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
+    
+    #[cfg(feature = "otel")]
+    let span = {
+        tracing::info_span!(
+            "codex_session",
+            git_commit = %git_commit,
+            git_repository_url = env!("CARGO_PKG_REPOSITORY"),
+            codex_config_model = %config.model,
+            codex_config_flags = %flags
+        )
+    };
+
+    #[cfg(not(feature = "otel"))]
+    let span = tracing::info_span!(
+        "codex_session",
+        git_commit = %git_commit,
+        git_repository_url = env!("CARGO_PKG_REPOSITORY"),
+        codex_config_model = %config.model,
+        codex_config_flags = %flags
+    );
+
+    #[cfg(feature = "otel")]
+    let _trace_id = {
+        let trace_id = span.id()
+            .map(|id| format!("{:x}", id.into_u64()))
+            .unwrap_or_else(|| "unknown".to_string());
+        unsafe {
+            std::env::set_var("CODEX_TRACE_ID", &trace_id);
+        }
+        trace_id
+    };
+
+    let _root_span = span.entered();
+
     let mut event_processor =
         EventProcessor::create_with_ansi(stdout_with_ansi, !config.hide_agent_reasoning);
     // Print the effective configuration and prompt so users can see what Codex
@@ -203,7 +271,10 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     }
 
     // Send the prompt.
-    let items: Vec<InputItem> = vec![InputItem::Text { text: prompt }];
+    let items: Vec<InputItem> = vec![InputItem::Text { text: prompt.clone() }];
+    let user_span = tracing::info_span!("user_message", content = %prompt);
+    let _us = user_span.enter();
+    tracing::event!(parent: &user_span, tracing::Level::INFO, content = %prompt);
     let initial_prompt_task_id = codex.submit(Op::UserInput { items }).await?;
     info!("Sent prompt with event ID: {initial_prompt_task_id}");
 

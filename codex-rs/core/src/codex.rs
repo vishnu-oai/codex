@@ -28,6 +28,16 @@ use tokio::sync::Notify;
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 use tracing::debug;
+
+const OTEL_CONTENT_LIMIT: usize = 64 * 1024;
+
+pub fn truncate_content(s: &str) -> String {
+    if s.len() > OTEL_CONTENT_LIMIT {
+        s.chars().take(OTEL_CONTENT_LIMIT).collect()
+    } else {
+        s.to_string()
+    }
+}
 use tracing::error;
 use tracing::info;
 use tracing::trace;
@@ -649,8 +659,9 @@ async fn submission_loop(
                 // TODO: if ConfigureSession is sent twice, we will create an
                 // overlapping rollout file. Consider passing RolloutRecorder
                 // from above.
+                let trace_id = std::env::var("CODEX_TRACE_ID").ok();
                 let rollout_recorder =
-                    match RolloutRecorder::new(&config, session_id, instructions.clone()).await {
+                    match RolloutRecorder::new(&config, session_id, instructions.clone(), trace_id).await {
                         Ok(r) => Some(r),
                         Err(e) => {
                             warn!("failed to initialise rollout recorder: {e}");
@@ -1119,6 +1130,12 @@ async fn try_run_turn(
         })
     };
 
+    let llm_span = tracing::info_span!(
+        "llm_request",
+        model = %sess.client.model(),
+        provider = %sess.client.provider().name
+    );
+    let _llm_guard = llm_span.enter();
     let mut stream = sess.client.clone().stream(&prompt).await?;
 
     // Buffer all the incoming messages from the stream first, then execute them.
@@ -1150,7 +1167,7 @@ async fn try_run_turn(
                     let mut state = sess.state.lock().unwrap();
                     state.pending_call_ids.insert(call_id.clone());
                 }
-                let response = handle_response_item(sess, sub_id, item.clone()).await?;
+                let response = handle_response_item(sess, sub_id, item.clone(), &llm_span).await?;
 
                 output.push(ProcessedResponseItem { item, response });
             }
@@ -1159,6 +1176,9 @@ async fn try_run_turn(
                 token_usage,
             } => {
                 if let Some(token_usage) = token_usage {
+                    llm_span.record("llm.request.tokens", &token_usage.input_tokens);
+                    llm_span.record("llm.response.tokens", &token_usage.output_tokens);
+                    llm_span.record("llm.total_tokens", &token_usage.total_tokens);
                     sess.tx_event
                         .send(Event {
                             id: sub_id.to_string(),
@@ -1181,12 +1201,16 @@ async fn handle_response_item(
     sess: &Session,
     sub_id: &str,
     item: ResponseItem,
+    llm_span: &tracing::Span,
 ) -> CodexResult<Option<ResponseInputItem>> {
     debug!(?item, "Output item");
     let output = match item {
         ResponseItem::Message { content, .. } => {
             for item in content {
                 if let ContentItem::OutputText { text } = item {
+                    llm_span.in_scope(|| {
+                        tracing::event!(tracing::Level::INFO, target = "assistant_msg", content = %truncate_content(&text));
+                    });
                     let event = Event {
                         id: sub_id.to_string(),
                         msg: EventMsg::AgentMessage(AgentMessageEvent { message: text }),
@@ -1420,9 +1444,12 @@ async fn handle_container_exec_with_params(
         }
     };
 
-    sess.notify_exec_command_begin(&sub_id, &call_id, &params)
+    sess
+        .notify_exec_command_begin(&sub_id, &call_id, &params)
         .await;
 
+    let span = tracing::info_span!("exec_cmd", cmd = %params.command.join(" "));
+    let _enter = span.enter();
     let output_result = process_exec_tool_call(
         params.clone(),
         sandbox_type,
@@ -1441,10 +1468,17 @@ async fn handle_container_exec_with_params(
                 duration,
             } = output;
 
+            span.record("exit_code", &exit_code);
+            span.record("duration_ms", &duration.as_millis() as &u128);
+
             sess.notify_exec_command_end(&sub_id, &call_id, &stdout, &stderr, exit_code)
                 .await;
 
             let is_success = exit_code == 0;
+            let out_text = if is_success { &stdout } else { &stderr };
+            span.in_scope(|| {
+                tracing::event!(tracing::Level::INFO, target = "exec_output", content = %truncate_content(out_text));
+            });
             let content = format_exec_output(
                 if is_success { &stdout } else { &stderr },
                 exit_code,

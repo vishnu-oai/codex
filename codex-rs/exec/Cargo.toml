@@ -38,3 +38,8 @@ tokio = { version = "1", features = [
 ] }
 tracing = { version = "0.1.41", features = ["log"] }
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tracing-opentelemetry = { version = "0.31", optional = true }
+opentelemetry = { version = "0.30", optional = true }
+
+[features]
+otel = ["codex-common/otel", "tracing-opentelemetry", "opentelemetry"]

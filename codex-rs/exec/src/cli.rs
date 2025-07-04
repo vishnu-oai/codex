@@ -54,6 +54,26 @@ pub struct Cli {
     /// if `-` is used), instructions are read from stdin.
     #[arg(value_name = "PROMPT")]
     pub prompt: Option<String>,
+
+    /// OpenTelemetry target (`file:/path` or URL). Can also be set via CODEX_OTEL.
+    #[cfg(feature = "otel")]
+    #[arg(long = "otel")]
+    pub otel: Option<String>,
+
+    /// Encoding for trace files. Can also be set via CODEX_OTEL_PROTOCOL.
+    #[cfg(feature = "otel")]
+    #[arg(long = "otel-protocol", value_enum, default_value = "binary")]
+    pub otel_protocol: OtelProtocol,
+
+    /// Sampling probability for tracing. Can also be set via CODEX_OTEL_SAMPLE_RATE.
+    #[cfg(feature = "otel")]
+    #[arg(long = "otel-sample-rate", default_value_t = 1.0)]
+    pub otel_sample_rate: f64,
+
+    /// Override service.name resource attribute.
+    #[cfg(feature = "otel")]
+    #[arg(long = "otel-service-name")]
+    pub otel_service_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -63,4 +83,20 @@ pub enum Color {
     Never,
     #[default]
     Auto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum OtelProtocol {
+    Binary,
+    Json,
+}
+
+impl OtelProtocol {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OtelProtocol::Binary => "binary",
+            OtelProtocol::Json => "json",
+        }
+    }
 }

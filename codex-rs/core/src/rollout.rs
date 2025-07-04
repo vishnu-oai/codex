@@ -28,6 +28,8 @@ struct SessionMeta {
     timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace_id: Option<String>,
 }
 
 /// Records all [`ResponseItem`]s for a session and flushes them to disk after
@@ -52,6 +54,7 @@ impl RolloutRecorder {
         config: &Config,
         uuid: Uuid,
         instructions: Option<String>,
+        trace_id: Option<String>,
     ) -> std::io::Result<Self> {
         let LogFileInfo {
             file,
@@ -71,6 +74,7 @@ impl RolloutRecorder {
             timestamp,
             id: session_id.to_string(),
             instructions,
+            trace_id,
         };
 
         // A reasonably-sized bounded channel. If the buffer fills up the send
