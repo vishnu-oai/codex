@@ -182,6 +182,7 @@ impl ChatWidget<'_> {
             items.push(InputItem::Text { text: text.clone() });
         }
 
+        let image_count = image_paths.len();
         for path in image_paths {
             items.push(InputItem::LocalImage { path });
         }
@@ -189,6 +190,12 @@ impl ChatWidget<'_> {
         if items.is_empty() {
             return;
         }
+        tracing::info!(
+            target = "user_input", 
+            text_length = text.len(), 
+            image_count = image_count,
+            "User message submitted"
+        );
 
         self.codex_op_tx
             .send(Op::UserInput { items })
@@ -234,6 +241,7 @@ impl ChatWidget<'_> {
                 self.request_redraw();
             }
             EventMsg::AgentMessage(AgentMessageEvent { message }) => {
+                tracing::info!(target = "agent_response", message_length = message.len(), "Agent message received");
                 self.conversation_history
                     .add_agent_message(&self.config, message);
                 self.request_redraw();
@@ -260,6 +268,17 @@ impl ChatWidget<'_> {
                 self.token_usage = add_token_usage(&self.token_usage, &token_usage);
                 self.bottom_pane
                     .set_token_usage(self.token_usage.clone(), self.config.model_context_window);
+                
+                // Add token counts to the current tracing span
+                tracing::Span::current().record("input_tokens", self.token_usage.input_tokens);
+                tracing::Span::current().record("output_tokens", self.token_usage.output_tokens);
+                tracing::Span::current().record("total_tokens", self.token_usage.total_tokens);
+                if let Some(cached) = self.token_usage.cached_input_tokens {
+                    tracing::Span::current().record("cached_input_tokens", cached);
+                }
+                if let Some(reasoning) = self.token_usage.reasoning_output_tokens {
+                    tracing::Span::current().record("reasoning_output_tokens", reasoning);
+                }
             }
             EventMsg::Error(ErrorEvent { message }) => {
                 self.conversation_history.add_error(message);

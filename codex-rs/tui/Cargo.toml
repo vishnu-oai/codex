@@ -62,3 +62,6 @@ uuid = "1"
 
 [dev-dependencies]
 pretty_assertions = "1"
+
+[features]
+otel = ["codex-common/otel"]

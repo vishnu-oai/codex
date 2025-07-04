@@ -13,6 +13,8 @@ use codex_core::protocol::SandboxPolicy;
 use codex_core::util::is_inside_git_repo;
 use codex_login::try_read_openai_api_key;
 use log_layer::TuiLogLayer;
+#[cfg(feature = "otel")]
+use codex_common::telemetry;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use tracing_appender::non_blocking;
@@ -48,6 +50,27 @@ mod user_approval_widget;
 pub use cli::Cli;
 
 pub fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> std::io::Result<()> {
+    // Initialize telemetry (OpenTelemetry tracing) with default auto-generated trace files
+    // This must happen before any other tracing setup
+    #[cfg(feature = "otel")]
+    telemetry::init_telemetry(telemetry::OtelConfig::default());
+
+    // Create a root span for the TUI session to ensure traces are captured
+    #[cfg(feature = "otel")]
+    let _root_span = {
+        let flags = std::env::args().collect::<Vec<_>>().join(" ");
+        tracing::info_span!(
+            "codex_tui_session",
+            codex_version = env!("CARGO_PKG_VERSION"),
+            codex_flags = %flags,
+            input_tokens = tracing::field::Empty,
+            output_tokens = tracing::field::Empty,
+            total_tokens = tracing::field::Empty,
+            cached_input_tokens = tracing::field::Empty,
+            reasoning_output_tokens = tracing::field::Empty
+        ).entered()
+    };
+
     let (sandbox_policy, approval_policy) = if cli.full_auto {
         (
             Some(SandboxPolicy::new_workspace_write_policy()),
@@ -122,6 +145,7 @@ pub fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> std::io::
     };
 
     // Build layered subscriber:
+    #[cfg(not(feature = "otel"))]
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking)
         .with_target(false)
@@ -129,12 +153,20 @@ pub fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> std::io::
 
     // Channel that carries formatted log lines to the UI.
     let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    #[cfg(not(feature = "otel"))]
     let tui_layer = TuiLogLayer::new(log_tx.clone(), 120).with_filter(env_filter());
 
-    let _ = tracing_subscriber::registry()
-        .with(file_layer)
-        .with(tui_layer)
-        .try_init();
+    // Only initialize tracing subscriber if telemetry hasn't already done it
+    #[cfg(not(feature = "otel"))]
+    {
+        let _ = tracing_subscriber::registry()
+            .with(file_layer)
+            .with(tui_layer)
+            .try_init();
+    }
+
+    // When OpenTelemetry is enabled, the telemetry module has already initialized the global subscriber
+    // We can't add more layers after that, but the telemetry traces will still be captured
 
     let show_login_screen = should_show_login_screen(&config);
 
@@ -144,7 +176,9 @@ pub fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> std::io::
     // `--allow-no-git-exec` flag.
     let show_git_warning = !cli.skip_git_repo_check && !is_inside_git_repo(&config);
 
+    tracing::info!("Starting TUI application");
     try_run_ratatui_app(cli, config, show_login_screen, show_git_warning, log_rx);
+    tracing::info!("TUI application finished");
     Ok(())
 }
 
@@ -171,6 +205,7 @@ fn run_ratatui_app(
     show_git_warning: bool,
     mut log_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
 ) -> color_eyre::Result<()> {
+    let _span = tracing::info_span!("run_ratatui_app").entered();
     color_eyre::install()?;
 
     // Forward panic reports through the tracing stack so that they appear in

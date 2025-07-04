@@ -70,7 +70,19 @@ impl SpanExporter for FileSpanExporter {
         async move {
             let mut buf = String::new();
             for span in batch {
-                buf.push_str(&format!("{:?}\n", span));
+                // Convert SpanData to OTLP protobuf format, then to JSON
+                let otlp_span = opentelemetry_proto::tonic::trace::v1::Span::from(span);
+                match serde_json::to_string(&otlp_span) {
+                    Ok(json) => {
+                        buf.push_str(&json);
+                        buf.push('\n');
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to serialize span to JSON: {}", e);
+                        // Fallback to debug format if JSON serialization fails
+                        buf.push_str(&format!("{:?}\n", otlp_span));
+                    }
+                }
             }
 
             match file.lock() {
