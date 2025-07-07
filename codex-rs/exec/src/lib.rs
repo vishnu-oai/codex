@@ -272,9 +272,13 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
 
     // Send the prompt.
     let items: Vec<InputItem> = vec![InputItem::Text { text: prompt.clone() }];
-    let user_span = tracing::info_span!("user_message", content = %prompt);
-    let _us = user_span.enter();
-    tracing::event!(parent: &user_span, tracing::Level::INFO, content = %prompt);
+    #[cfg(feature = "otel")]
+    let _us = tracing::info_span!(
+        "user_message",
+        role = "user",
+        content = %prompt,
+        message_type = "user_input"
+    ).entered();
     let initial_prompt_task_id = codex.submit(Op::UserInput { items }).await?;
     info!("Sent prompt with event ID: {initial_prompt_task_id}");
 

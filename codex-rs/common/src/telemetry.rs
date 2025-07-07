@@ -1,4 +1,4 @@
-use tracing_subscriber::fmt;
+// Removed fmt import since we no longer use stderr formatting
 
 #[cfg(feature = "otel")]
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Registry};
@@ -138,9 +138,8 @@ pub fn init_telemetry(config: OtelConfig) {
         .or_else(|| std::env::var("CODEX_OTEL").ok())
         .or_else(|| generate_default_trace_file());
 
-    // If no telemetry target is specified, just use basic formatting.
+    // If no telemetry target is specified, do nothing.
     let Some(target) = target else {
-        let _ = fmt().try_init();
         return;
     };
     
@@ -168,15 +167,30 @@ pub fn init_telemetry(config: OtelConfig) {
     static VERSION: &str = env!("CARGO_PKG_VERSION");
     static REPO: &str = env!("CARGO_PKG_REPOSITORY");
 
-    let resource = Resource::builder_empty()
-        .with_attributes([
-            KeyValue::new("service.name", service_name),
-            KeyValue::new("service.version", VERSION),
-            KeyValue::new("git.repository_url", REPO),
-        ])
-        .build();
+    // Try to capture git commit info if available
+    let git_commit = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
 
-    let fmt_layer = fmt::layer();
+    let mut resource_attrs = vec![
+        KeyValue::new("service.name", service_name),
+        KeyValue::new("service.version", VERSION),
+        KeyValue::new("git.repository_url", REPO),
+        KeyValue::new("git.commit_sha", git_commit),
+    ];
+
+    // Add any environment context that might be useful for traces
+    if let Ok(env_trace_id) = std::env::var("CODEX_TRACE_ID") {
+        resource_attrs.push(KeyValue::new("codex.trace_id", env_trace_id));
+    }
+
+    let resource = Resource::builder_empty()
+        .with_attributes(resource_attrs)
+        .build();
 
     if target.starts_with("file://") {
         // Path is everything after scheme.
@@ -194,13 +208,11 @@ pub fn init_telemetry(config: OtelConfig) {
                 let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
                 Registry::default()
-                    .with(fmt_layer)
                     .with(otel_layer)
                     .init();
             }
             Err(e) => {
                 eprintln!("Failed to create file exporter: {e}");
-                let _ = fmt().try_init();
             }
         }
     } else if target == "stdout" {
@@ -216,7 +228,6 @@ pub fn init_telemetry(config: OtelConfig) {
         let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
         Registry::default()
-            .with(fmt_layer)
             .with(otel_layer)
             .init();
     } else {
@@ -245,13 +256,11 @@ pub fn init_telemetry(config: OtelConfig) {
                 let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
                 Registry::default()
-                    .with(fmt_layer)
                     .with(otel_layer)
                     .init();
             }
             Err(e) => {
                 eprintln!("Failed to create OTLP exporter: {e}");
-                let _ = fmt().try_init();
             }
         }
     }

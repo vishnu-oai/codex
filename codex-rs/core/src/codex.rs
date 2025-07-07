@@ -38,6 +38,90 @@ pub fn truncate_content(s: &str) -> String {
         s.to_string()
     }
 }
+
+/// Structured tracing support for conversation events
+#[cfg(feature = "otel")]
+mod conversation_tracing {
+    use tracing::{info_span, Span};
+    
+    /// Create a user message span within the current context
+    pub fn create_user_message_span(content: &str) -> Span {
+        info_span!(
+            "user_message",
+            role = "user",
+            content = crate::codex::truncate_content(content),
+            message_type = "user_input"
+        )
+    }
+    
+    /// Create an LLM request span for assistant interactions
+    pub fn create_llm_request_span(model: &str, provider: &str) -> Span {
+        info_span!(
+            "llm_request",
+            model = model,
+            provider = provider,
+            prompt_tokens = tracing::field::Empty,
+            completion_tokens = tracing::field::Empty,
+            total_tokens = tracing::field::Empty,
+            cached_tokens = tracing::field::Empty,
+            reasoning_tokens = tracing::field::Empty,
+            retries = tracing::field::Empty
+        )
+    }
+    
+    /// Create a span for assistant messages
+    pub fn create_assistant_message_span() -> Span {
+        info_span!(
+            "assistant_msg",
+            role = "assistant",
+            content = tracing::field::Empty,
+            message_type = "assistant_response"
+        )
+    }
+    
+    /// Create a span for tool calls
+    pub fn create_tool_call_span(tool_name: &str, args: &str) -> Span {
+        info_span!(
+            "tool_call",
+            tool = tool_name,
+            args = crate::codex::truncate_content(args),
+            call_type = "function_call"
+        )
+    }
+    
+    /// Create a span for command execution
+    pub fn create_exec_cmd_span(cmd: &str) -> Span {
+        info_span!(
+            "exec_cmd",
+            cmd = cmd,
+            exit_code = tracing::field::Empty,
+            duration_ms = tracing::field::Empty,
+            stdout_size = tracing::field::Empty,
+            stderr_size = tracing::field::Empty
+        )
+    }
+    
+    /// Record token usage in the current span
+    pub fn record_token_usage(
+        input_tokens: u64,
+        output_tokens: u64,
+        total_tokens: u64,
+        cached_tokens: Option<u64>,
+        reasoning_tokens: Option<u64>,
+    ) {
+        let current_span = Span::current();
+        current_span.record("prompt_tokens", input_tokens);
+        current_span.record("completion_tokens", output_tokens);
+        current_span.record("total_tokens", total_tokens);
+        if let Some(cached) = cached_tokens {
+            current_span.record("cached_tokens", cached);
+        }
+        if let Some(reasoning) = reasoning_tokens {
+            current_span.record("reasoning_tokens", reasoning);
+        }
+    }
+}
+
 use tracing::error;
 use tracing::info;
 use tracing::trace;
@@ -815,6 +899,23 @@ async fn run_task(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) {
     if input.is_empty() {
         return;
     }
+    
+    // Create a user message span based on the input content
+    let user_message_content = input.iter()
+        .filter_map(|item| match item {
+            InputItem::Text { text } => Some(text.as_str()),
+            _ => None, // Images don't contribute to text content
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    
+    // Create a user message span but don't hold onto the guard to avoid Send issues
+    #[cfg(feature = "otel")]
+    if !user_message_content.is_empty() {
+        let _user_span = conversation_tracing::create_user_message_span(&user_message_content);
+        // The span will be active for this task - we don't need to hold the guard
+    }
+    
     let event = Event {
         id: sub_id.clone(),
         msg: EventMsg::TaskStarted,
@@ -1130,10 +1231,9 @@ async fn try_run_turn(
         })
     };
 
-    let llm_span = tracing::info_span!(
-        "llm_request",
-        model = %sess.client.model(),
-        provider = %sess.client.provider().name
+    let llm_span = conversation_tracing::create_llm_request_span(
+        sess.client.model(),
+        &sess.client.provider().name
     );
     let _llm_guard = llm_span.enter();
     let mut stream = sess.client.clone().stream(&prompt).await?;
@@ -1176,9 +1276,14 @@ async fn try_run_turn(
                 token_usage,
             } => {
                 if let Some(token_usage) = token_usage {
-                    llm_span.record("llm.request.tokens", &token_usage.input_tokens);
-                    llm_span.record("llm.response.tokens", &token_usage.output_tokens);
-                    llm_span.record("llm.total_tokens", &token_usage.total_tokens);
+                    #[cfg(feature = "otel")]
+                    conversation_tracing::record_token_usage(
+                        token_usage.input_tokens,
+                        token_usage.output_tokens,
+                        token_usage.total_tokens,
+                        token_usage.cached_input_tokens,
+                        token_usage.reasoning_output_tokens,
+                    );
                     sess.tx_event
                         .send(Event {
                             id: sub_id.to_string(),
@@ -1201,16 +1306,17 @@ async fn handle_response_item(
     sess: &Session,
     sub_id: &str,
     item: ResponseItem,
-    llm_span: &tracing::Span,
+    _llm_span: &tracing::Span,
 ) -> CodexResult<Option<ResponseInputItem>> {
     debug!(?item, "Output item");
     let output = match item {
         ResponseItem::Message { content, .. } => {
             for item in content {
                 if let ContentItem::OutputText { text } = item {
-                    llm_span.in_scope(|| {
-                        tracing::event!(tracing::Level::INFO, target = "assistant_msg", content = %truncate_content(&text));
-                    });
+                    let assistant_span = conversation_tracing::create_assistant_message_span();
+                    let _assistant_guard = assistant_span.enter();
+                    assistant_span.record("content", truncate_content(&text).as_str());
+                    
                     let event = Event {
                         id: sub_id.to_string(),
                         msg: EventMsg::AgentMessage(AgentMessageEvent { message: text }),
@@ -1238,7 +1344,8 @@ async fn handle_response_item(
             arguments,
             call_id,
         } => {
-            info!("FunctionCall: {arguments}");
+            let tool_span = conversation_tracing::create_tool_call_span(&name, &arguments);
+            let _tool_guard = tool_span.enter();
             Some(handle_function_call(sess, sub_id.to_string(), name, arguments, call_id).await)
         }
         ResponseItem::LocalShellCall {
@@ -1248,7 +1355,10 @@ async fn handle_response_item(
             action,
         } => {
             let LocalShellAction::Exec(action) = action;
-            tracing::info!("LocalShellCall: {action:?}");
+            let cmd_str = action.command.join(" ");
+            let tool_span = conversation_tracing::create_tool_call_span("shell", &cmd_str);
+            let _tool_guard = tool_span.enter();
+            
             let params = ShellToolCallParams {
                 command: action.command,
                 workdir: action.working_directory,
@@ -1448,7 +1558,7 @@ async fn handle_container_exec_with_params(
         .notify_exec_command_begin(&sub_id, &call_id, &params)
         .await;
 
-    let span = tracing::info_span!("exec_cmd", cmd = %params.command.join(" "));
+    let span = conversation_tracing::create_exec_cmd_span(&params.command.join(" "));
     let _enter = span.enter();
     let output_result = process_exec_tool_call(
         params.clone(),
@@ -1468,17 +1578,15 @@ async fn handle_container_exec_with_params(
                 duration,
             } = output;
 
-            span.record("exit_code", &exit_code);
-            span.record("duration_ms", &duration.as_millis() as &u128);
+            span.record("exit_code", exit_code);
+            span.record("duration_ms", duration.as_millis() as u64);
+            span.record("stdout_size", stdout.len());
+            span.record("stderr_size", stderr.len());
 
             sess.notify_exec_command_end(&sub_id, &call_id, &stdout, &stderr, exit_code)
                 .await;
 
             let is_success = exit_code == 0;
-            let out_text = if is_success { &stdout } else { &stderr };
-            span.in_scope(|| {
-                tracing::event!(tracing::Level::INFO, target = "exec_output", content = %truncate_content(out_text));
-            });
             let content = format_exec_output(
                 if is_success { &stdout } else { &stderr },
                 exit_code,

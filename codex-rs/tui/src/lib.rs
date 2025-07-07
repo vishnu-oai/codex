@@ -12,13 +12,18 @@ use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::util::is_inside_git_repo;
 use codex_login::try_read_openai_api_key;
-use log_layer::TuiLogLayer;
 #[cfg(feature = "otel")]
 use codex_common::telemetry;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
+
+#[cfg(not(feature = "otel"))]
+use log_layer::TuiLogLayer;
+#[cfg(not(feature = "otel"))]
 use tracing_appender::non_blocking;
+#[cfg(not(feature = "otel"))]
 use tracing_subscriber::EnvFilter;
+#[cfg(not(feature = "otel"))]
 use tracing_subscriber::prelude::*;
 
 mod app;
@@ -59,8 +64,20 @@ pub fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> std::io::
     #[cfg(feature = "otel")]
     let _root_span = {
         let flags = std::env::args().collect::<Vec<_>>().join(" ");
+        
+        // Try to capture git commit info if available
+        let git_commit = std::process::Command::new("git")
+            .args(["rev-parse", "--verify", "HEAD"])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        
         tracing::info_span!(
             "codex_tui_session",
+            git_commit = %git_commit,
+            git_repository_url = env!("CARGO_PKG_REPOSITORY"),
             codex_version = env!("CARGO_PKG_VERSION"),
             codex_flags = %flags,
             input_tokens = tracing::field::Empty,
@@ -133,37 +150,37 @@ pub fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> std::io::
         log_file_opts.mode(0o600);
     }
 
-    let log_file = log_file_opts.open(log_dir.join("codex-tui.log"))?;
-
-    // Wrap file in non‑blocking writer.
-    let (non_blocking, _guard) = non_blocking(log_file);
-
-    // use RUST_LOG env var, default to info for codex crates.
-    let env_filter = || {
-        EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("codex_core=info,codex_tui=info"))
-    };
-
-    // Build layered subscriber:
-    #[cfg(not(feature = "otel"))]
-    let file_layer = tracing_subscriber::fmt::layer()
-        .with_writer(non_blocking)
-        .with_target(false)
-        .with_filter(env_filter());
-
-    // Channel that carries formatted log lines to the UI.
-    let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    #[cfg(not(feature = "otel"))]
-    let tui_layer = TuiLogLayer::new(log_tx.clone(), 120).with_filter(env_filter());
+    let _log_file = log_file_opts.open(log_dir.join("codex-tui.log"))?;
 
     // Only initialize tracing subscriber if telemetry hasn't already done it
     #[cfg(not(feature = "otel"))]
     {
+        // Set up logging for the TUI (both file and UI display)
+        let (non_blocking, _guard) = non_blocking(_log_file);
+        let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+        // use RUST_LOG env var, default to info for codex crates.
+        let env_filter = || {
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("codex_core=info,codex_tui=info"))
+        };
+
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_writer(non_blocking)
+            .with_target(false)
+            .with_filter(env_filter());
+
+        let tui_layer = TuiLogLayer::new(log_tx.clone(), 120).with_filter(env_filter());
+
         let _ = tracing_subscriber::registry()
             .with(file_layer)
             .with(tui_layer)
             .try_init();
     }
+
+    // When telemetry is enabled, we still need the log receiver for UI display
+    #[cfg(feature = "otel")]
+    let (_log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     // When OpenTelemetry is enabled, the telemetry module has already initialized the global subscriber
     // We can't add more layers after that, but the telemetry traces will still be captured

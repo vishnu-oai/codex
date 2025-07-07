@@ -190,12 +190,19 @@ impl ChatWidget<'_> {
         if items.is_empty() {
             return;
         }
-        tracing::info!(
-            target = "user_input", 
-            text_length = text.len(), 
-            image_count = image_count,
-            "User message submitted"
-        );
+        
+        // Create a user message span for proper tracing hierarchy
+        #[cfg(feature = "otel")]
+        let _user_guard = {
+            let user_span = tracing::info_span!(
+                "user_message",
+                role = "user",
+                content = %text,
+                message_type = "user_input",
+                image_count = image_count
+            );
+            user_span.entered()
+        };
 
         self.codex_op_tx
             .send(Op::UserInput { items })
@@ -241,7 +248,7 @@ impl ChatWidget<'_> {
                 self.request_redraw();
             }
             EventMsg::AgentMessage(AgentMessageEvent { message }) => {
-                tracing::info!(target = "agent_response", message_length = message.len(), "Agent message received");
+                // Agent message tracing is now handled by core conversation spans
                 self.conversation_history
                     .add_agent_message(&self.config, message);
                 self.request_redraw();
@@ -269,7 +276,8 @@ impl ChatWidget<'_> {
                 self.bottom_pane
                     .set_token_usage(self.token_usage.clone(), self.config.model_context_window);
                 
-                // Add token counts to the current tracing span
+                // Token counts are now handled by core conversation spans via record_token_usage
+                // But we still record cumulative counts on the root TUI session span
                 tracing::Span::current().record("input_tokens", self.token_usage.input_tokens);
                 tracing::Span::current().record("output_tokens", self.token_usage.output_tokens);
                 tracing::Span::current().record("total_tokens", self.token_usage.total_tokens);

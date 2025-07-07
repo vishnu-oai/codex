@@ -13,7 +13,7 @@ use std::task::Poll;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::debug;
-use tracing::trace;
+// use tracing::warn; // Removed to reduce noise
 
 use crate::ModelProviderInfo;
 use crate::client_common::Prompt;
@@ -243,7 +243,7 @@ where
             Ok(v) => v,
             Err(_) => continue,
         };
-        trace!("chat_completions received SSE chunk: {chunk:?}");
+        // Removed noisy per-chunk tracing to reduce trace noise
 
         let choice_opt = chunk.get("choices").and_then(|c| c.get(0));
 
