@@ -115,15 +115,7 @@ mod conversation_tracing {
         )
     }
     
-    /// Create a span for rollout recording
-    pub fn create_rollout_record_span(item_count: usize) -> Span {
-        info_span!(
-            "rollout_record",
-            item_count = item_count,
-            error = tracing::field::Empty,
-            record_type = "session_persistence"
-        )
-    }
+
     
     /// Record token usage in the current span
     pub fn record_token_usage(
@@ -445,16 +437,8 @@ impl Session {
         };
 
         if let Some(rec) = recorder {
-            // Create a trace span for rollout recording
-            #[cfg(feature = "otel")]
-            let rollout_span = conversation_tracing::create_rollout_record_span(items.len());
-            #[cfg(feature = "otel")]
-            let _rollout_guard = rollout_span.enter();
-            
             if let Err(e) = rec.record_items(items).await {
                 error!("failed to record rollout items: {e:#}");
-                #[cfg(feature = "otel")]
-                rollout_span.record("error", e.to_string().as_str());
             }
         }
     }

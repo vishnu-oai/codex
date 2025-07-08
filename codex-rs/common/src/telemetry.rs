@@ -56,7 +56,7 @@ fn should_include_span(metadata: &tracing::Metadata) -> bool {
     // ALWAYS include spans that match rollout event types
     if matches!(name, 
         "user_message" | "assistant_msg" | "tool_call" | "exec_cmd" | 
-        "function_call_output" | "rollout_record" | "codex_session" | 
+        "function_call_output" | "codex_session" | 
         "codex_tui_session" | "codex_proto_session" | "llm_request"
     ) {
         return true;
