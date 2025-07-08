@@ -156,7 +156,11 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
             git_commit = %git_commit,
             git_repository_url = env!("CARGO_PKG_REPOSITORY"),
             codex_config_model = %config.model,
-            codex_config_flags = %flags
+            codex_config_flags = %flags,
+            session_id = tracing::field::Empty,
+            session_timestamp = tracing::field::Empty,
+            instructions = tracing::field::Empty,
+            model = tracing::field::Empty
         )
     };
 

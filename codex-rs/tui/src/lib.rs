@@ -84,7 +84,11 @@ pub fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> std::io::
             output_tokens = tracing::field::Empty,
             total_tokens = tracing::field::Empty,
             cached_input_tokens = tracing::field::Empty,
-            reasoning_output_tokens = tracing::field::Empty
+            reasoning_output_tokens = tracing::field::Empty,
+            session_id = tracing::field::Empty,
+            session_timestamp = tracing::field::Empty,
+            instructions = tracing::field::Empty,
+            model = tracing::field::Empty
         ).entered()
     };
 

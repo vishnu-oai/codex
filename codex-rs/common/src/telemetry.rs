@@ -1,7 +1,9 @@
 // Removed fmt import since we no longer use stderr formatting
 
 #[cfg(feature = "otel")]
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Registry};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Registry, Layer};
+#[cfg(feature = "otel")]
+use tracing_subscriber::filter::FilterFn;
 #[cfg(feature = "otel")]
 use opentelemetry::trace::TracerProvider;
 #[cfg(feature = "otel")]
@@ -41,7 +43,50 @@ pub struct OtelConfig {
 /// Initialize tracing subscriber, no‑op when otel feature is disabled.
 #[cfg(not(feature = "otel"))]
 pub fn init_telemetry(_config: OtelConfig) {
+    use tracing_subscriber::fmt;
     let _ = fmt().try_init();
+}
+
+/// Custom filter to reduce noise while preserving rollout-equivalent spans
+#[cfg(feature = "otel")]
+fn should_include_span(metadata: &tracing::Metadata) -> bool {
+    let target = metadata.target();
+    let name = metadata.name();
+    
+    // ALWAYS include spans that match rollout event types
+    if matches!(name, 
+        "user_message" | "assistant_msg" | "tool_call" | "exec_cmd" | 
+        "function_call_output" | "rollout_record" | "codex_session" | 
+        "codex_tui_session" | "codex_proto_session" | "llm_request"
+    ) {
+        return true;
+    }
+    
+    // EXCLUDE noisy UI and third-party spans
+    if target.starts_with("tui_markdown") 
+        || target.starts_with("crossterm")
+        || target.starts_with("hyper_util")
+        || target.contains("markdown")
+        || name.contains("push_line")
+        || name.contains("handle_event")
+        || name.contains("push_span")
+        || name.contains("pop_span")
+        || name.contains("push_inline_style")
+        || name.contains("pop_inline_style")
+        || name.contains("style")
+        || name.contains("Line::default")
+        || target.starts_with("reqwest")
+        || target.starts_with("h2")
+        || target.starts_with("tower")
+    {
+        return false;
+    }
+    
+    // Include core codex spans
+    target.starts_with("codex_") 
+        || target.starts_with("exec")
+        || target == "codex_core"
+        || target.starts_with("codex_core")
 }
 
 #[cfg(feature = "otel")]
@@ -206,9 +251,12 @@ pub fn init_telemetry(config: OtelConfig) {
                 opentelemetry::global::set_tracer_provider(provider.clone());
                 let tracer = provider.tracer("codex-cli");
                 let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+                
+                // Apply custom filtering to reduce noise
+                let filter = FilterFn::new(should_include_span);
 
                 Registry::default()
-                    .with(otel_layer)
+                    .with(otel_layer.with_filter(filter))
                     .init();
             }
             Err(e) => {
@@ -226,9 +274,12 @@ pub fn init_telemetry(config: OtelConfig) {
         opentelemetry::global::set_tracer_provider(provider.clone());
         let tracer = provider.tracer("codex-cli");
         let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+        
+        // Apply custom filtering to reduce noise
+        let filter = FilterFn::new(should_include_span);
 
         Registry::default()
-            .with(otel_layer)
+            .with(otel_layer.with_filter(filter))
             .init();
     } else {
         let exporter_result = if protocol == "http" {
@@ -254,9 +305,12 @@ pub fn init_telemetry(config: OtelConfig) {
                 opentelemetry::global::set_tracer_provider(provider.clone());
                 let tracer = provider.tracer("codex-cli");
                 let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+                
+                // Apply custom filtering to reduce noise
+                let filter = FilterFn::new(should_include_span);
 
                 Registry::default()
-                    .with(otel_layer)
+                    .with(otel_layer.with_filter(filter))
                     .init();
             }
             Err(e) => {
