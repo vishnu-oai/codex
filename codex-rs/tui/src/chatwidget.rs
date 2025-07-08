@@ -204,8 +204,16 @@ impl ChatWidget<'_> {
             user_span.entered()
         };
 
+        // TODO: Extract current OpenTelemetry context for trace propagation
+        // For now, we'll rely on the existing tracing infrastructure
+        #[cfg(feature = "otel")]
+        let span_context = None; // Temporarily disabled until we implement proper context propagation
+        
+        #[cfg(not(feature = "otel"))]
+        let span_context = None;
+
         self.codex_op_tx
-            .send(Op::UserInput { items })
+            .send(Op::UserInput { items, span_context })
             .unwrap_or_else(|e| {
                 tracing::error!("failed to send message: {e}");
             });

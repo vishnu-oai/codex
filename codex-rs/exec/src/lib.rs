@@ -258,7 +258,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
             .into_iter()
             .map(|path| InputItem::LocalImage { path })
             .collect();
-        let initial_images_event_id = codex.submit(Op::UserInput { items }).await?;
+        let initial_images_event_id = codex.submit(Op::UserInput { items, span_context: None }).await?;
         info!("Sent images with event ID: {initial_images_event_id}");
         while let Ok(event) = codex.next_event().await {
             if event.id == initial_images_event_id
@@ -283,7 +283,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         content = %prompt,
         message_type = "user_input"
     ).entered();
-    let initial_prompt_task_id = codex.submit(Op::UserInput { items }).await?;
+    let initial_prompt_task_id = codex.submit(Op::UserInput { items, span_context: None }).await?;
     info!("Sent prompt with event ID: {initial_prompt_task_id}");
 
     // Run the loop until the task is complete.

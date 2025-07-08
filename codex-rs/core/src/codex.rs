@@ -614,7 +614,37 @@ pub(crate) struct AgentTask {
 impl AgentTask {
     fn spawn(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) -> Self {
         let handle =
-            tokio::spawn(run_task(Arc::clone(&sess), sub_id.clone(), input)).abort_handle();
+            tokio::spawn(run_task(Arc::clone(&sess), sub_id.clone(), input, None)).abort_handle();
+        Self {
+            sess,
+            sub_id,
+            handle,
+        }
+    }
+
+    #[cfg(feature = "otel")]
+    fn spawn_with_context(
+        sess: Arc<Session>, 
+        sub_id: String, 
+        input: Vec<InputItem>,
+        span_context: Option<std::collections::HashMap<String, String>>
+    ) -> Self {
+        let handle = tokio::spawn(run_task(Arc::clone(&sess), sub_id.clone(), input, span_context)).abort_handle();
+        Self {
+            sess,
+            sub_id,
+            handle,
+        }
+    }
+
+    #[cfg(not(feature = "otel"))]
+    fn spawn_with_context(
+        sess: Arc<Session>, 
+        sub_id: String, 
+        input: Vec<InputItem>,
+        _span_context: Option<()>
+    ) -> Self {
+        let handle = tokio::spawn(run_task(Arc::clone(&sess), sub_id.clone(), input, None)).abort_handle();
         Self {
             sess,
             sub_id,
@@ -840,7 +870,7 @@ async fn submission_loop(
                     }
                 }
             }
-            Op::UserInput { items } => {
+            Op::UserInput { items, span_context } => {
                 let sess = match sess.as_ref() {
                     Some(sess) => sess,
                     None => {
@@ -852,7 +882,7 @@ async fn submission_loop(
                 // attempt to inject input into current task
                 if let Err(items) = sess.inject_input(items) {
                     // no current task, spawn a new one
-                    let task = AgentTask::spawn(Arc::clone(sess), sub.id, items);
+                    let task = AgentTask::spawn_with_context(Arc::clone(sess), sub.id, items, span_context);
                     sess.set_task(task);
                 }
             }
@@ -944,33 +974,51 @@ async fn submission_loop(
 ///   back to the model in the next turn.
 /// - If the model sends only an assistant message, we record it in the
 ///   conversation history and consider the task complete.
-async fn run_task(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) {
+#[cfg(feature = "otel")]
+async fn run_task(
+    sess: Arc<Session>, 
+    sub_id: String, 
+    input: Vec<InputItem>,
+    span_context: Option<std::collections::HashMap<String, String>>
+) {
     if input.is_empty() {
         return;
     }
     
-    // Create a user message span based on the input content
+    // For now, ignore the propagated context and just create a normal span
+    // TODO: Implement proper context propagation once we have the tracing-opentelemetry setup
+    let _ = span_context; // Avoid unused variable warning
+    
     let user_message_content = input.iter()
         .filter_map(|item| match item {
             InputItem::Text { text } => Some(text.as_str()),
-            _ => None, // Images don't contribute to text content
+            _ => None,
         })
         .collect::<Vec<_>>()
         .join(" ");
     
-    // Create a user message span as the root span for this conversation turn
-    #[cfg(feature = "otel")]
     let user_span = if !user_message_content.is_empty() {
         conversation_tracing::create_user_message_span(&user_message_content)
     } else {
-        // Create a generic user span even if no text content
         tracing::info_span!("user_message", content = "non-text-input")
     };
     
-    #[cfg(not(feature = "otel"))]
-    let user_span = tracing::Span::none();
+    run_task_inner(sess, sub_id, input).instrument(user_span).await;
+}
+
+#[cfg(not(feature = "otel"))]
+async fn run_task(
+    sess: Arc<Session>, 
+    sub_id: String, 
+    input: Vec<InputItem>,
+    _span_context: Option<()>
+) {
+    if input.is_empty() {
+        return;
+    }
     
-    // Use async instrumentation to make this span the parent of all operations
+    // No OpenTelemetry support, use basic instrumentation
+    let user_span = tracing::Span::none();
     run_task_inner(sess, sub_id, input).instrument(user_span).await;
 }
 
