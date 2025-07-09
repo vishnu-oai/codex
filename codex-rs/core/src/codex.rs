@@ -969,10 +969,6 @@ async fn run_task(
         return;
     }
     
-    // For now, ignore the propagated context and just create a normal span
-    // TODO: Implement proper context propagation once we have the tracing-opentelemetry setup
-    let _ = span_context; // Avoid unused variable warning
-    
     let user_message_content = input.iter()
         .filter_map(|item| match item {
             InputItem::Text { text } => Some(text.as_str()),
@@ -981,10 +977,34 @@ async fn run_task(
         .collect::<Vec<_>>()
         .join(" ");
     
-    let user_span = if !user_message_content.is_empty() {
-        conversation_tracing::create_user_message_span(&user_message_content)
+    // Create user message span with proper parent context if available
+    let user_span = if let Some(context_map) = span_context {
+        // Extract and set the parent context from the propagated span context
+        let parent_context = opentelemetry::global::get_text_map_propagator(|propagator| {
+            propagator.extract(&context_map)
+        });
+        
+        // Temporarily set the extracted context as current to create child spans
+        let _guard = parent_context.attach();
+        
+        // Create span which will automatically be a child of the current context
+        if !user_message_content.is_empty() {
+            tracing::info_span!(
+                "user_message",
+                role = "user",
+                content = truncate_content(&user_message_content),
+                message_type = "user_input"
+            )
+        } else {
+            tracing::info_span!("user_message", content = "non-text-input")
+        }
     } else {
-        tracing::info_span!("user_message", content = "non-text-input")
+        // Fallback to normal span creation when no context is provided
+        if !user_message_content.is_empty() {
+            conversation_tracing::create_user_message_span(&user_message_content)
+        } else {
+            tracing::info_span!("user_message", content = "non-text-input")
+        }
     };
     
     run_task_inner(sess, sub_id, input).instrument(user_span).await;

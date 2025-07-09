@@ -204,10 +204,23 @@ impl ChatWidget<'_> {
             user_span.entered()
         };
 
-        // TODO: Extract current OpenTelemetry context for trace propagation
-        // For now, we'll rely on the existing tracing infrastructure
+        // Extract current OpenTelemetry context for trace propagation
         #[cfg(feature = "otel")]
-        let span_context = None; // Temporarily disabled until we implement proper context propagation
+        let span_context = {
+            use std::collections::HashMap;
+            
+            // Extract the current span context to propagate to the core
+            let current_context = opentelemetry::Context::current();
+            let mut carrier = HashMap::new();
+            opentelemetry::global::get_text_map_propagator(|propagator| {
+                propagator.inject_context(&current_context, &mut carrier);
+            });
+            if carrier.is_empty() {
+                None
+            } else {
+                Some(carrier)
+            }
+        };
         
         #[cfg(not(feature = "otel"))]
         let span_context = None;
