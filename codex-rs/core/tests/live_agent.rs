@@ -82,6 +82,7 @@ async fn live_streaming_and_prev_id_reset() {
     // ---------- Task 1 ----------
     codex
         .submit(Op::UserInput {
+            span_context: None,
             items: vec![InputItem::Text {
                 text: "Say the words 'stream test'".into(),
             }],
@@ -116,6 +117,7 @@ async fn live_streaming_and_prev_id_reset() {
     // ---------- Task 2 (same session) ----------
     codex
         .submit(Op::UserInput {
+            span_context: None,
             items: vec![InputItem::Text {
                 text: "Respond with exactly: second turn succeeded".into(),
             }],
@@ -167,6 +169,7 @@ async fn live_shell_function_call() {
 
     codex
         .submit(Op::UserInput {
+            span_context: None,
             items: vec![InputItem::Text {
                 text: format!(
                     "Use the shell function to run the command `echo {MARKER}` and no other commands."

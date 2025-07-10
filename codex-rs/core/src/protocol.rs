@@ -79,6 +79,13 @@ pub enum Op {
     UserInput {
         /// User input items, see `InputItem`
         items: Vec<InputItem>,
+        /// Span context for tracing propagation - serialized OpenTelemetry context
+        #[cfg(feature = "otel")]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        span_context: Option<std::collections::HashMap<String, String>>,
+        #[cfg(not(feature = "otel"))]
+        #[serde(skip)]
+        span_context: Option<()>,
     },
 
     /// Approve a command execution

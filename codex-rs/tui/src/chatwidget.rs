@@ -175,23 +175,46 @@ impl ChatWidget<'_> {
     }
 
     fn submit_user_message(&mut self, user_message: UserMessage) {
-        let UserMessage { text, image_paths } = user_message;
-        let mut items: Vec<InputItem> = Vec::new();
+        // Extract image paths before moving fields out of user_message
+        let UserMessage {
+            text,
+            image_paths,
+        } = user_message;
 
-        if !text.is_empty() {
-            items.push(InputItem::Text { text: text.clone() });
+        let mut items = Vec::new();
+        items.push(InputItem::Text { text: text.clone() });
+        for path in &image_paths {
+            items.push(InputItem::LocalImage {
+                path: path.clone(),
+            });
         }
 
-        for path in image_paths {
-            items.push(InputItem::LocalImage { path });
-        }
+        // Create a span for the user message with appropriate metadata
+        let image_count = image_paths.len();
+        let _enter = {
+            let user_span = tracing::info_span!(
+                "user_message",
+                content = %text,
+                message_type = "user_input",
+                image_count = image_count
+            );
+            user_span.entered()
+        };
 
-        if items.is_empty() {
-            return;
-        }
+        // Create a trace context for propagating spans to the core
+        #[cfg(feature = "otel")]
+        let span_context = {
+            // Use the new TraceContext abstraction to capture the current context
+            let trace_context = codex_core::telemetry::TraceContext::capture_current();
+            // Extract the inner map for serialization
+            trace_context.into_inner()
+        };
+        
+        #[cfg(not(feature = "otel"))]
+        let span_context = None;
 
         self.codex_op_tx
-            .send(Op::UserInput { items })
+            .send(Op::UserInput { items, span_context })
             .unwrap_or_else(|e| {
                 tracing::error!("failed to send message: {e}");
             });
@@ -234,6 +257,7 @@ impl ChatWidget<'_> {
                 self.request_redraw();
             }
             EventMsg::AgentMessage(AgentMessageEvent { message }) => {
+                // Agent message tracing is now handled by core conversation spans
                 self.conversation_history
                     .add_agent_message(&self.config, message);
                 self.request_redraw();
@@ -260,6 +284,18 @@ impl ChatWidget<'_> {
                 self.token_usage = add_token_usage(&self.token_usage, &token_usage);
                 self.bottom_pane
                     .set_token_usage(self.token_usage.clone(), self.config.model_context_window);
+                
+                // Token counts are now handled by core conversation spans via record_token_usage
+                // But we still record cumulative counts on the root TUI session span
+                tracing::Span::current().record("input_tokens", self.token_usage.input_tokens);
+                tracing::Span::current().record("output_tokens", self.token_usage.output_tokens);
+                tracing::Span::current().record("total_tokens", self.token_usage.total_tokens);
+                if let Some(cached) = self.token_usage.cached_input_tokens {
+                    tracing::Span::current().record("cached_input_tokens", cached);
+                }
+                if let Some(reasoning) = self.token_usage.reasoning_output_tokens {
+                    tracing::Span::current().record("reasoning_output_tokens", reasoning);
+                }
             }
             EventMsg::Error(ErrorEvent { message }) => {
                 self.conversation_history.add_error(message);
