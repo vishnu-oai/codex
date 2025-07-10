@@ -24,7 +24,7 @@ pub(crate) async fn handle_mcp_tool_call(
     let span = tracing::info_span!("tool_call", tool = %tool_name, server = %server);
     let _enter = span.enter();
     if !arguments.is_empty() {
-        tracing::event!(parent: &span, tracing::Level::INFO, target = "tool_args", content = %crate::codex::truncate_content(&arguments));
+        tracing::event!(parent: &span, tracing::Level::INFO, target = "tool_args", content = %crate::telemetry::truncate_content(&arguments));
     }
     // Parse the `arguments` as JSON. An empty string is OK, but invalid JSON
     // is not.
@@ -67,7 +67,7 @@ pub(crate) async fn handle_mcp_tool_call(
     notify_mcp_tool_call_event(sess, sub_id, tool_call_end_event.clone()).await;
     if let Ok(ref val) = result {
         if let Ok(text) = serde_json::to_string(val) {
-            tracing::event!(parent: &span, tracing::Level::INFO, target = "tool_result", content = %crate::codex::truncate_content(&text));
+            tracing::event!(parent: &span, tracing::Level::INFO, target = "tool_result", content = %crate::telemetry::truncate_content(&text));
         }
     }
 

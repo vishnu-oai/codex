@@ -175,28 +175,25 @@ impl ChatWidget<'_> {
     }
 
     fn submit_user_message(&mut self, user_message: UserMessage) {
-        let UserMessage { text, image_paths } = user_message;
-        let mut items: Vec<InputItem> = Vec::new();
+        // Extract image paths before moving fields out of user_message
+        let UserMessage {
+            text,
+            image_paths,
+        } = user_message;
 
-        if !text.is_empty() {
-            items.push(InputItem::Text { text: text.clone() });
+        let mut items = Vec::new();
+        items.push(InputItem::Text { text: text.clone() });
+        for path in &image_paths {
+            items.push(InputItem::LocalImage {
+                path: path.clone(),
+            });
         }
 
+        // Create a span for the user message with appropriate metadata
         let image_count = image_paths.len();
-        for path in image_paths {
-            items.push(InputItem::LocalImage { path });
-        }
-
-        if items.is_empty() {
-            return;
-        }
-        
-        // Create a user message span for proper tracing hierarchy
-        #[cfg(feature = "otel")]
-        let _user_guard = {
+        let _enter = {
             let user_span = tracing::info_span!(
                 "user_message",
-                role = "user",
                 content = %text,
                 message_type = "user_input",
                 image_count = image_count
@@ -204,22 +201,13 @@ impl ChatWidget<'_> {
             user_span.entered()
         };
 
-        // Extract current OpenTelemetry context for trace propagation
+        // Create a trace context for propagating spans to the core
         #[cfg(feature = "otel")]
         let span_context = {
-            use std::collections::HashMap;
-            
-            // Extract the current span context to propagate to the core
-            let current_context = opentelemetry::Context::current();
-            let mut carrier = HashMap::new();
-            opentelemetry::global::get_text_map_propagator(|propagator| {
-                propagator.inject_context(&current_context, &mut carrier);
-            });
-            if carrier.is_empty() {
-                None
-            } else {
-                Some(carrier)
-            }
+            // Use the new TraceContext abstraction to capture the current context
+            let trace_context = codex_core::telemetry::TraceContext::capture_current();
+            // Extract the inner map for serialization
+            trace_context.into_inner()
         };
         
         #[cfg(not(feature = "otel"))]

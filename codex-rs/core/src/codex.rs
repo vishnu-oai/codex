@@ -29,115 +29,6 @@ use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 use tracing::debug;
 
-const OTEL_CONTENT_LIMIT: usize = 64 * 1024;
-
-pub fn truncate_content(s: &str) -> String {
-    if s.len() > OTEL_CONTENT_LIMIT {
-        s.chars().take(OTEL_CONTENT_LIMIT).collect()
-    } else {
-        s.to_string()
-    }
-}
-
-/// Structured tracing support for conversation events
-#[cfg(feature = "otel")]
-mod conversation_tracing {
-    use tracing::{info_span, Span};
-    
-    /// Create a user message span within the current context
-    pub fn create_user_message_span(content: &str) -> Span {
-        info_span!(
-            "user_message",
-            role = "user",
-            content = crate::codex::truncate_content(content),
-            message_type = "user_input"
-        )
-    }
-    
-    /// Create an LLM request span for assistant interactions
-    pub fn create_llm_request_span(model: &str, provider: &str) -> Span {
-        info_span!(
-            "llm_request",
-            model = model,
-            provider = provider,
-            prompt_tokens = tracing::field::Empty,
-            completion_tokens = tracing::field::Empty,
-            total_tokens = tracing::field::Empty,
-            cached_tokens = tracing::field::Empty,
-            reasoning_tokens = tracing::field::Empty,
-            retries = tracing::field::Empty
-        )
-    }
-    
-    /// Create a span for assistant messages
-    pub fn create_assistant_message_span() -> Span {
-        info_span!(
-            "assistant_msg",
-            role = "assistant",
-            content = tracing::field::Empty,
-            message_type = "assistant_response"
-        )
-    }
-    
-    /// Create a span for tool calls
-    pub fn create_tool_call_span(tool_name: &str, args: &str) -> Span {
-        info_span!(
-            "tool_call",
-            tool = tool_name,
-            args = crate::codex::truncate_content(args),
-            call_type = "function_call"
-        )
-    }
-    
-    /// Create a span for command execution
-    pub fn create_exec_cmd_span(cmd: &str) -> Span {
-        info_span!(
-            "exec_cmd",
-            cmd = cmd,
-            exit_code = tracing::field::Empty,
-            duration_ms = tracing::field::Empty,
-            stdout_size = tracing::field::Empty,
-            stderr_size = tracing::field::Empty,
-            status = tracing::field::Empty,
-            working_directory = tracing::field::Empty
-        )
-    }
-    
-    /// Create a span for function call outputs
-    pub fn create_function_call_output_span(call_id: &str) -> Span {
-        info_span!(
-            "function_call_output",
-            call_id = call_id,
-            success = tracing::field::Empty,
-            content_size = tracing::field::Empty,
-            call_type = "function_output",
-            content = tracing::field::Empty
-        )
-    }
-    
-
-    
-    /// Record token usage in the current span
-    pub fn record_token_usage(
-        input_tokens: u64,
-        output_tokens: u64,
-        total_tokens: u64,
-        cached_tokens: Option<u64>,
-        reasoning_tokens: Option<u64>,
-    ) {
-        let current_span = Span::current();
-        current_span.record("prompt_tokens", input_tokens);
-        current_span.record("completion_tokens", output_tokens);
-        current_span.record("total_tokens", total_tokens);
-        if let Some(cached) = cached_tokens {
-            current_span.record("cached_tokens", cached);
-        }
-        if let Some(reasoning) = reasoning_tokens {
-            current_span.record("reasoning_tokens", reasoning);
-        }
-    }
-}
-
 use tracing::error;
 use tracing::info;
 use tracing::trace;
@@ -199,6 +90,9 @@ use crate::rollout::RolloutRecorder;
 use crate::safety::SafetyCheck;
 use crate::safety::assess_command_safety;
 use crate::safety::assess_patch_safety;
+use crate::telemetry::conversation_tracing;
+use crate::telemetry::truncate_content;
+use crate::telemetry::TraceContext;
 use crate::user_notification::UserNotification;
 use crate::util::backoff;
 
@@ -597,8 +491,8 @@ pub(crate) struct AgentTask {
 
 impl AgentTask {
     fn spawn(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) -> Self {
-        let handle =
-            tokio::spawn(run_task(Arc::clone(&sess), sub_id.clone(), input, None)).abort_handle();
+        let trace_context = None;
+        let handle = tokio::spawn(run_task_with_context(Arc::clone(&sess), sub_id.clone(), input, trace_context)).abort_handle();
         Self {
             sess,
             sub_id,
@@ -606,29 +500,16 @@ impl AgentTask {
         }
     }
 
-    #[cfg(feature = "otel")]
+    // Updated to use the new TraceContext abstraction
     fn spawn_with_context(
         sess: Arc<Session>, 
         sub_id: String, 
         input: Vec<InputItem>,
         span_context: Option<std::collections::HashMap<String, String>>
     ) -> Self {
-        let handle = tokio::spawn(run_task(Arc::clone(&sess), sub_id.clone(), input, span_context)).abort_handle();
-        Self {
-            sess,
-            sub_id,
-            handle,
-        }
-    }
-
-    #[cfg(not(feature = "otel"))]
-    fn spawn_with_context(
-        sess: Arc<Session>, 
-        sub_id: String, 
-        input: Vec<InputItem>,
-        _span_context: Option<()>
-    ) -> Self {
-        let handle = tokio::spawn(run_task(Arc::clone(&sess), sub_id.clone(), input, None)).abort_handle();
+        // Convert the raw context map to a TraceContext
+        let trace_context = TraceContext::from_context_map(span_context);
+        let handle = tokio::spawn(run_task_with_context(Arc::clone(&sess), sub_id.clone(), input, Some(trace_context))).abort_handle();
         Self {
             sess,
             sub_id,
@@ -854,7 +735,7 @@ async fn submission_loop(
                     }
                 }
             }
-            Op::UserInput { items, span_context } => {
+            Op::UserInput { items, span_context: raw_span_context } => {
                 let sess = match sess.as_ref() {
                     Some(sess) => sess,
                     None => {
@@ -866,7 +747,12 @@ async fn submission_loop(
                 // attempt to inject input into current task
                 if let Err(items) = sess.inject_input(items) {
                     // no current task, spawn a new one
-                    let task = AgentTask::spawn_with_context(Arc::clone(sess), sub.id, items, span_context);
+                    #[cfg(feature = "otel")]
+                    let task = AgentTask::spawn_with_context(Arc::clone(sess), sub.id, items, raw_span_context);
+                    
+                    #[cfg(not(feature = "otel"))]
+                    let task = AgentTask::spawn(Arc::clone(sess), sub.id, items);
+                    
                     sess.set_task(task);
                 }
             }
@@ -958,12 +844,11 @@ async fn submission_loop(
 ///   back to the model in the next turn.
 /// - If the model sends only an assistant message, we record it in the
 ///   conversation history and consider the task complete.
-#[cfg(feature = "otel")]
-async fn run_task(
+async fn run_task_with_context(
     sess: Arc<Session>, 
     sub_id: String, 
     input: Vec<InputItem>,
-    span_context: Option<std::collections::HashMap<String, String>>
+    trace_context: Option<TraceContext>
 ) {
     if input.is_empty() {
         return;
@@ -977,52 +862,18 @@ async fn run_task(
         .collect::<Vec<_>>()
         .join(" ");
     
-    // Create user message span with proper parent context if available
-    let user_span = if let Some(context_map) = span_context {
-        // Extract and set the parent context from the propagated span context
-        let parent_context = opentelemetry::global::get_text_map_propagator(|propagator| {
-            propagator.extract(&context_map)
-        });
-        
-        // Temporarily set the extracted context as current to create child spans
-        let _guard = parent_context.attach();
-        
-        // Create span which will automatically be a child of the current context
-        if !user_message_content.is_empty() {
-            tracing::info_span!(
-                "user_message",
-                role = "user",
-                content = truncate_content(&user_message_content),
-                message_type = "user_input"
-            )
-        } else {
-            tracing::info_span!("user_message", content = "non-text-input")
-        }
-    } else {
-        // Fallback to normal span creation when no context is provided
-        if !user_message_content.is_empty() {
-            conversation_tracing::create_user_message_span(&user_message_content)
-        } else {
-            tracing::info_span!("user_message", content = "non-text-input")
+    // Create user message span with proper context if available
+    let user_span = match &trace_context {
+        Some(ctx) => ctx.create_user_message_span(&user_message_content),
+        None => {
+            if !user_message_content.is_empty() {
+                conversation_tracing::create_user_message_span(&user_message_content)
+            } else {
+                tracing::info_span!("user_message", content = "non-text-input")
+            }
         }
     };
     
-    run_task_inner(sess, sub_id, input).instrument(user_span).await;
-}
-
-#[cfg(not(feature = "otel"))]
-async fn run_task(
-    sess: Arc<Session>, 
-    sub_id: String, 
-    input: Vec<InputItem>,
-    _span_context: Option<()>
-) {
-    if input.is_empty() {
-        return;
-    }
-    
-    // No OpenTelemetry support, use basic instrumentation
-    let user_span = tracing::Span::none();
     run_task_inner(sess, sub_id, input).instrument(user_span).await;
 }
 

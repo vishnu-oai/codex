@@ -156,12 +156,14 @@ pub fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> std::io::
 
     let _log_file = log_file_opts.open(log_dir.join("codex-tui.log"))?;
 
+    // Create log channel for UI display (used in both otel and non-otel cases)
+    let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
     // Only initialize tracing subscriber if telemetry hasn't already done it
     #[cfg(not(feature = "otel"))]
     {
         // Set up logging for the TUI (both file and UI display)
         let (non_blocking, _guard) = non_blocking(_log_file);
-        let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
         // use RUST_LOG env var, default to info for codex crates.
         let env_filter = || {
@@ -182,12 +184,9 @@ pub fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> std::io::
             .try_init();
     }
 
-    // When telemetry is enabled, we still need the log receiver for UI display
-    #[cfg(feature = "otel")]
-    let (_log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-
     // When OpenTelemetry is enabled, the telemetry module has already initialized the global subscriber
-    // We can't add more layers after that, but the telemetry traces will still be captured
+    // We can't add more layers after that, but the telemetry traces will still be captured.
+    // The log_rx is still available for UI display purposes even though we don't actively send to log_tx.
 
     let show_login_screen = should_show_login_screen(&config);
 
