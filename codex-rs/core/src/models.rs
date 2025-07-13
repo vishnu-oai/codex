@@ -208,7 +208,7 @@ pub struct ShellToolCallParams {
 #[derive(Deserialize, Debug, Clone)]
 pub struct FunctionCallOutputPayload {
     pub content: String,
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     pub success: Option<bool>,
 }
 
@@ -340,14 +340,14 @@ mod tests {
     #[test]
     fn user_feedback_to_llm_compatible_conversion() {
         let user_feedback = ResponseItem::UserFeedback {
-            call_id: "call_789".to_string(),
+            call_id: "call_6789".to_string(),
             feedback: "This is user feedback".to_string(),
         };
 
         let llm_compatible = user_feedback.to_llm_compatible();
 
         if let ResponseItem::FunctionCallOutput { call_id, output } = llm_compatible {
-            assert_eq!(call_id, "call_789");
+            assert_eq!(call_id, "call_6789");
             assert_eq!(output.content, "This is user feedback");
             assert_eq!(output.success, None);
         } else {

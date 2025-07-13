@@ -203,9 +203,9 @@ impl Session {
 }
 
 #[derive(Default)]
-struct Approval {
-    decision: ReviewDecision,
-    feedback: Option<String>,
+pub struct Approval {
+    pub decision: ReviewDecision,
+    pub feedback: Option<String>,
 }
 
 /// Mutable state of the agent
@@ -1805,7 +1805,10 @@ async fn apply_patch(
                         Some(root.clone()),
                     )
                     .await;
-                let Approval { decision, feedback } = rx.await.unwrap_or_default();
+                let Approval {
+                    decision,
+                    feedback: _,
+                } = rx.await.unwrap_or_default();
                 if matches!(
                     decision,
                     ReviewDecision::Approved | ReviewDecision::ApprovedForSession
