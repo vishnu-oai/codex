@@ -296,7 +296,12 @@ impl Session {
         rx_approve
     }
 
-    pub fn notify_approval(&self, sub_id: &str, decision: ReviewDecision, feedback: Option<String>) {
+    pub fn notify_approval(
+        &self,
+        sub_id: &str,
+        decision: ReviewDecision,
+        feedback: Option<String>,
+    ) {
         let mut state = self.state.lock().unwrap();
         if let Some(tx_approve) = state.pending_approvals.remove(sub_id) {
             tx_approve.send(Approval { decision, feedback }).ok();
@@ -718,7 +723,11 @@ async fn submission_loop(
                     sess.set_task(task);
                 }
             }
-            Op::ExecApproval { id, decision, feedback } => {
+            Op::ExecApproval {
+                id,
+                decision,
+                feedback,
+            } => {
                 let sess = match sess.as_ref() {
                     Some(sess) => sess,
                     None => {
@@ -733,7 +742,11 @@ async fn submission_loop(
                     other => sess.notify_approval(&id, other, feedback.clone()),
                 }
             }
-            Op::PatchApproval { id, decision, feedback } => {
+            Op::PatchApproval {
+                id,
+                decision,
+                feedback,
+            } => {
                 let sess = match sess.as_ref() {
                     Some(sess) => sess,
                     None => {
@@ -911,10 +924,12 @@ async fn run_task(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) {
                             Some(ResponseInputItem::UserFeedback { call_id, feedback }),
                         ) => {
                             items_to_record_in_conversation_history.push(item);
-                            items_to_record_in_conversation_history.push(ResponseItem::UserFeedback {
-                                call_id: call_id.clone(),
-                                feedback: feedback.clone(),
-                            });
+                            items_to_record_in_conversation_history.push(
+                                ResponseItem::UserFeedback {
+                                    call_id: call_id.clone(),
+                                    feedback: feedback.clone(),
+                                },
+                            );
                         }
                         (
                             ResponseItem::FunctionCall { .. },
@@ -933,10 +948,12 @@ async fn run_task(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) {
                             Some(ResponseInputItem::UserFeedback { call_id, feedback }),
                         ) => {
                             items_to_record_in_conversation_history.push(item);
-                            items_to_record_in_conversation_history.push(ResponseItem::UserFeedback {
-                                call_id: call_id.clone(),
-                                feedback: feedback.clone(),
-                            });
+                            items_to_record_in_conversation_history.push(
+                                ResponseItem::UserFeedback {
+                                    call_id: call_id.clone(),
+                                    feedback: feedback.clone(),
+                                },
+                            );
                         }
                         (
                             ResponseItem::FunctionCall { .. },
@@ -967,10 +984,12 @@ async fn run_task(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) {
                         }
                         (_, Some(ResponseInputItem::UserFeedback { call_id, feedback })) => {
                             // Record the original user feedback item in the rollout as UserFeedback
-                            items_to_record_in_conversation_history.push(ResponseItem::UserFeedback {
-                                call_id: call_id.clone(),
-                                feedback: feedback.clone(),
-                            });
+                            items_to_record_in_conversation_history.push(
+                                ResponseItem::UserFeedback {
+                                    call_id: call_id.clone(),
+                                    feedback: feedback.clone(),
+                                },
+                            );
                         }
                         _ => {
                             warn!("Unexpected response item: {item:?} with response: {response:?}");
@@ -1702,7 +1721,10 @@ async fn apply_patch(
             .request_patch_approval(sub_id.clone(), &action, reason.clone(), Some(root.clone()))
             .await;
         let Approval { decision, feedback } = rx.await.unwrap_or_default();
-        if !matches!(decision, ReviewDecision::Approved | ReviewDecision::ApprovedForSession) {
+        if !matches!(
+            decision,
+            ReviewDecision::Approved | ReviewDecision::ApprovedForSession
+        ) {
             return ResponseInputItem::UserFeedback {
                 call_id,
                 feedback: feedback
@@ -1776,11 +1798,19 @@ async fn apply_patch(
                     "grant write access to {} for this session",
                     root.display()
                 ));
-                let rx =
-                    sess.request_patch_approval(sub_id.clone(), &action, reason.clone(), Some(root.clone()))
-                        .await;
+                let rx = sess
+                    .request_patch_approval(
+                        sub_id.clone(),
+                        &action,
+                        reason.clone(),
+                        Some(root.clone()),
+                    )
+                    .await;
                 let Approval { decision, feedback } = rx.await.unwrap_or_default();
-                if matches!(decision, ReviewDecision::Approved | ReviewDecision::ApprovedForSession) {
+                if matches!(
+                    decision,
+                    ReviewDecision::Approved | ReviewDecision::ApprovedForSession
+                ) {
                     // Extend writable roots.
                     sess.writable_roots.lock().unwrap().push(root);
                     stdout.clear();

@@ -119,7 +119,7 @@ impl ResponseItem {
                 call_id: call_id.clone(),
                 output: FunctionCallOutputPayload {
                     content: feedback.clone(),
-                    success: Some(None),
+                    success: None,
                 },
             },
             _ => self.clone(),
@@ -349,7 +349,7 @@ mod tests {
         if let ResponseItem::FunctionCallOutput { call_id, output } = llm_compatible {
             assert_eq!(call_id, "call_789");
             assert_eq!(output.content, "This is user feedback");
-            assert_eq!(output.success, Some(false));
+            assert_eq!(output.success, None);
         } else {
             panic!("Expected FunctionCallOutput variant");
         }

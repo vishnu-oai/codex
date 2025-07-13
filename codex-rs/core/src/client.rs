@@ -110,8 +110,12 @@ impl ModelClient {
         let tools_json = create_tools_json_for_responses_api(prompt, &self.model)?;
         let reasoning = create_reasoning_param_for_request(&self.model, self.effort, self.summary);
         // Convert UserFeedback items to FunctionCallOutput for LLM compatibility
-        let llm_compatible_input: Vec<_> = prompt.input.iter().map(|item| item.to_llm_compatible()).collect();
-        
+        let llm_compatible_input: Vec<_> = prompt
+            .input
+            .iter()
+            .map(|item| item.to_llm_compatible())
+            .collect();
+
         let payload = ResponsesApiRequest {
             model: &self.model,
             instructions: &full_instructions,

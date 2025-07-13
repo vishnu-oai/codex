@@ -296,12 +296,20 @@ impl UserApprovalWidget<'_> {
             ApprovalRequest::Exec { id, .. } => Op::ExecApproval {
                 id: id.clone(),
                 decision,
-                feedback: if feedback.is_empty() { None } else { Some(feedback) },
+                feedback: if feedback.is_empty() {
+                    None
+                } else {
+                    Some(feedback)
+                },
             },
             ApprovalRequest::ApplyPatch { id, .. } => Op::PatchApproval {
                 id: id.clone(),
                 decision,
-                feedback: if feedback.is_empty() { None } else { Some(feedback) },
+                feedback: if feedback.is_empty() {
+                    None
+                } else {
+                    Some(feedback)
+                },
             },
         };
 
