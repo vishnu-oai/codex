@@ -301,6 +301,7 @@ impl UserApprovalWidget<'_> {
             ApprovalRequest::ApplyPatch { id, .. } => Op::PatchApproval {
                 id: id.clone(),
                 decision,
+                feedback: if feedback.is_empty() { None } else { Some(feedback) },
             },
         };
 

@@ -733,7 +733,7 @@ async fn submission_loop(
                     other => sess.notify_approval(&id, other, feedback.clone()),
                 }
             }
-            Op::PatchApproval { id, decision } => {
+            Op::PatchApproval { id, decision, feedback } => {
                 let sess = match sess.as_ref() {
                     Some(sess) => sess,
                     None => {
@@ -745,7 +745,7 @@ async fn submission_loop(
                     ReviewDecision::Abort => {
                         sess.abort();
                     }
-                    other => sess.notify_approval(&id, other, None),
+                    other => sess.notify_approval(&id, other, feedback.clone()),
                 }
             }
             Op::AddToHistory { text } => {
@@ -1667,12 +1667,11 @@ async fn apply_patch(
             match decision {
                 ReviewDecision::Approved | ReviewDecision::ApprovedForSession => false,
                 ReviewDecision::Denied | ReviewDecision::Abort => {
-                    return ResponseInputItem::FunctionCallOutput {
+                    return ResponseInputItem::UserFeedback {
                         call_id,
-                        output: FunctionCallOutputPayload {
-                            content: "patch rejected by user".to_string(),
-                            success: Some(false),
-                        },
+                        feedback: feedback
+                            .map(|f| format!("patch rejected by user with feedback: `{f}`"))
+                            .unwrap_or_else(|| "patch rejected by user".to_string()),
                     };
                 }
             }
@@ -1702,14 +1701,13 @@ async fn apply_patch(
         let rx = sess
             .request_patch_approval(sub_id.clone(), &action, reason.clone(), Some(root.clone()))
             .await;
-        let Approval { decision, .. } = rx.await.unwrap_or_default();
+        let Approval { decision, feedback } = rx.await.unwrap_or_default();
         if !matches!(decision, ReviewDecision::Approved | ReviewDecision::ApprovedForSession) {
-            return ResponseInputItem::FunctionCallOutput {
+            return ResponseInputItem::UserFeedback {
                 call_id,
-                output: FunctionCallOutputPayload {
-                    content: "patch rejected by user".to_string(),
-                    success: Some(false),
-                },
+                feedback: feedback
+                    .map(|f| format!("patch rejected by user with feedback: `{f}`"))
+                    .unwrap_or_else(|| "patch rejected by user".to_string()),
             };
         }
 
@@ -1781,7 +1779,7 @@ async fn apply_patch(
                 let rx =
                     sess.request_patch_approval(sub_id.clone(), &action, reason.clone(), Some(root.clone()))
                         .await;
-                let Approval { decision, .. } = rx.await.unwrap_or_default();
+                let Approval { decision, feedback } = rx.await.unwrap_or_default();
                 if matches!(decision, ReviewDecision::Approved | ReviewDecision::ApprovedForSession) {
                     // Extend writable roots.
                     sess.writable_roots.lock().unwrap().push(root);

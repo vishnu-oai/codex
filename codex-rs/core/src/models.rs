@@ -119,7 +119,7 @@ impl ResponseItem {
                 call_id: call_id.clone(),
                 output: FunctionCallOutputPayload {
                     content: feedback.clone(),
-                    success: Some(false), // User feedback typically indicates an issue
+                    success: Some(None),
                 },
             },
             _ => self.clone(),
