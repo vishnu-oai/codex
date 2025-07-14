@@ -6,6 +6,8 @@
 use std::fs::File;
 use std::fs::{self};
 use std::io::Error as IoError;
+use std::path::Path;
+use std::process::Command;
 
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -23,11 +25,107 @@ use crate::models::ResponseItem;
 const SESSIONS_SUBDIR: &str = "sessions";
 
 #[derive(Serialize)]
+struct GitInfo {
+    /// Current commit hash (SHA)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit_hash: Option<String>,
+    /// Current branch name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    /// Repository URL (if available from remote)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repository_url: Option<String>,
+    /// Working directory status (clean/dirty)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_clean: Option<bool>,
+}
+
+#[derive(Serialize)]
 struct SessionMeta {
     id: String,
     timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git: Option<GitInfo>,
+}
+
+/// Collect git repository information from the given working directory using command-line git.
+/// Returns None if no git repository is found or if git operations fail.
+fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
+    // Check if we're in a git repository
+    let is_git_repo = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(cwd)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+
+    if !is_git_repo {
+        return None;
+    }
+
+    let mut git_info = GitInfo {
+        commit_hash: None,
+        branch: None,
+        repository_url: None,
+        is_clean: None,
+    };
+
+    // Get current commit hash
+    if let Ok(output) = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(cwd)
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(hash) = String::from_utf8(output.stdout) {
+                git_info.commit_hash = Some(hash.trim().to_string());
+            }
+        }
+    }
+
+    // Get current branch name
+    if let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(cwd)
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(branch) = String::from_utf8(output.stdout) {
+                let branch = branch.trim();
+                if branch != "HEAD" {
+                    git_info.branch = Some(branch.to_string());
+                }
+            }
+        }
+    }
+
+    // Get repository URL from origin remote
+    if let Ok(output) = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(cwd)
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(url) = String::from_utf8(output.stdout) {
+                git_info.repository_url = Some(url.trim().to_string());
+            }
+        }
+    }
+
+    // Check if working directory is clean (no staged or unstaged changes)
+    if let Ok(output) = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(cwd)
+        .output()
+    {
+        if output.status.success() {
+            git_info.is_clean = Some(output.stdout.is_empty());
+        }
+    }
+
+    Some(git_info)
 }
 
 /// Records all [`ResponseItem`]s for a session and flushes them to disk after
@@ -52,6 +150,7 @@ impl RolloutRecorder {
         config: &Config,
         uuid: Uuid,
         instructions: Option<String>,
+        cwd: &Path,
     ) -> std::io::Result<Self> {
         let LogFileInfo {
             file,
@@ -67,15 +166,19 @@ impl RolloutRecorder {
             .format(timestamp_format)
             .map_err(|e| IoError::other(format!("failed to format timestamp: {e}")))?;
 
+        // Collect git repository information
+        let git_info = collect_git_info(cwd);
+
         let meta = SessionMeta {
             timestamp,
             id: session_id.to_string(),
             instructions,
+            git: git_info,
         };
 
         // A reasonably-sized bounded channel. If the buffer fills up the send
         // future will yield, which is fine – we only need to ensure we do not
-        // perform *blocking* I/O on the caller’s thread.
+        // perform *blocking* I/O on the caller's thread.
         let (tx, mut rx) = mpsc::channel::<String>(256);
 
         // Spawn a Tokio task that owns the file handle and performs async
