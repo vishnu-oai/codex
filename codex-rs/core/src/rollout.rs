@@ -35,9 +35,6 @@ struct GitInfo {
     /// Repository URL (if available from remote)
     #[serde(skip_serializing_if = "Option::is_none")]
     repository_url: Option<String>,
-    /// Working directory status (clean/dirty)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    is_clean: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -69,7 +66,6 @@ fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
         commit_hash: None,
         branch: None,
         repository_url: None,
-        is_clean: None,
     };
 
     // Get current commit hash
@@ -111,17 +107,6 @@ fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
             if let Ok(url) = String::from_utf8(output.stdout) {
                 git_info.repository_url = Some(url.trim().to_string());
             }
-        }
-    }
-
-    // Check if working directory is clean (no staged or unstaged changes)
-    if let Ok(output) = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(cwd)
-        .output()
-    {
-        if output.status.success() {
-            git_info.is_clean = Some(output.stdout.is_empty());
         }
     }
 
