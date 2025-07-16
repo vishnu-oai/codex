@@ -7,7 +7,10 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub use cli::Cli;
+use codex_common::CliConfigOverrides;
+#[cfg(feature = "otel")]
+use codex_common::telemetry;
+use codex_core::Codex;
 use codex_core::codex_wrapper;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
@@ -20,12 +23,12 @@ use codex_core::protocol::Op;
 use codex_core::protocol::TaskCompleteEvent;
 use codex_core::util::is_inside_git_repo;
 use event_processor::EventProcessor;
-#[cfg(feature = "otel")]
-use codex_common::telemetry;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+
+pub use cli::Cli;
 
 pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()> {
     let Cli {
@@ -140,14 +143,11 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
 
     let config = Config::load_with_cli_overrides(cli_kv_overrides, overrides)?;
 
-    let git_commit = std::process::Command::new("git")
-        .args(["rev-parse", "--verify", "HEAD"])
-        .current_dir(&config.cwd)
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    #[cfg(feature = "otel")]
+    let git_commit = codex_common::telemetry::get_git_commit_from_dir(&config.cwd);
+    #[cfg(not(feature = "otel"))]
+    let git_commit = "unknown".to_string();
+    
     let flags = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
     
     #[cfg(feature = "otel")]

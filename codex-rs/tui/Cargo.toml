@@ -24,6 +24,7 @@ codex-common = { path = "../common", features = [
     "cli",
     "elapsed",
     "sandbox_summary",
+    "otel",
 ] }
 codex-file-search = { path = "../file-search" }
 codex-linux-sandbox = { path = "../linux-sandbox" }

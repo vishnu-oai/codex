@@ -40,6 +40,33 @@ pub struct OtelConfig {
     pub service_name: Option<String>,
 }
 
+/// Get the current git commit SHA if available, otherwise returns "unknown".
+/// This function is used consistently across all telemetry initialization points.
+#[cfg(feature = "otel")]
+pub fn get_git_commit() -> String {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Get the current git commit SHA from a specific working directory.
+/// Falls back to "unknown" if git command fails or directory doesn't have git.
+#[cfg(feature = "otel")]
+pub fn get_git_commit_from_dir(cwd: &std::path::Path) -> String {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 /// Initialize tracing subscriber, no‑op when otel feature is disabled.
 #[cfg(not(feature = "otel"))]
 pub fn init_telemetry(_config: OtelConfig) {
@@ -212,14 +239,7 @@ pub fn init_telemetry(config: OtelConfig) {
     static VERSION: &str = env!("CARGO_PKG_VERSION");
     static REPO: &str = env!("CARGO_PKG_REPOSITORY");
 
-    // Try to capture git commit info if available
-    let git_commit = std::process::Command::new("git")
-        .args(["rev-parse", "--verify", "HEAD"])
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    let git_commit = get_git_commit();
 
     let mut resource_attrs = vec![
         KeyValue::new("service.name", service_name),

@@ -55,24 +55,28 @@ mod user_approval_widget;
 pub use cli::Cli;
 
 pub fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> std::io::Result<()> {
+    eprintln!("DEBUG: TUI run_main called");
+    
     // Initialize telemetry (OpenTelemetry tracing) with default auto-generated trace files
     // This must happen before any other tracing setup
     #[cfg(feature = "otel")]
-    telemetry::init_telemetry(telemetry::OtelConfig::default());
+    {
+        eprintln!("DEBUG: TUI telemetry initialization starting");
+        telemetry::init_telemetry(telemetry::OtelConfig::default());
+        eprintln!("DEBUG: TUI telemetry initialized");
+    }
+    #[cfg(not(feature = "otel"))]
+    {
+        eprintln!("DEBUG: TUI otel feature NOT enabled");
+    }
 
     // Create a root span for the TUI session to ensure traces are captured
     #[cfg(feature = "otel")]
     let _root_span = {
         let flags = std::env::args().collect::<Vec<_>>().join(" ");
         
-        // Try to capture git commit info if available
-        let git_commit = std::process::Command::new("git")
-            .args(["rev-parse", "--verify", "HEAD"])
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let git_commit = codex_common::telemetry::get_git_commit();
+        eprintln!("DEBUG: TUI git commit: {}", git_commit);
         
         tracing::info_span!(
             "codex_tui_session",
