@@ -61,7 +61,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         sample_rate: Some(otel_sample_rate),
         service_name: otel_service_name,
     });
-    
+
     #[cfg(not(feature = "otel"))]
     {
         // Initialize basic tracing without OpenTelemetry
@@ -147,9 +147,9 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     let git_commit = codex_common::telemetry::get_git_commit_from_dir(&config.cwd);
     #[cfg(not(feature = "otel"))]
     let git_commit = "unknown".to_string();
-    
+
     let flags = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
-    
+
     #[cfg(feature = "otel")]
     let span = {
         tracing::info_span!(
@@ -176,7 +176,8 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
 
     #[cfg(feature = "otel")]
     let _trace_id = {
-        let trace_id = span.id()
+        let trace_id = span
+            .id()
             .map(|id| format!("{:x}", id.into_u64()))
             .unwrap_or_else(|| "unknown".to_string());
         unsafe {
@@ -259,7 +260,12 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
             .into_iter()
             .map(|path| InputItem::LocalImage { path })
             .collect();
-        let initial_images_event_id = codex.submit(Op::UserInput { items, span_context: None }).await?;
+        let initial_images_event_id = codex
+            .submit(Op::UserInput {
+                items,
+                span_context: None,
+            })
+            .await?;
         info!("Sent images with event ID: {initial_images_event_id}");
         while let Ok(event) = codex.next_event().await {
             if event.id == initial_images_event_id
@@ -276,15 +282,23 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     }
 
     // Send the prompt.
-    let items: Vec<InputItem> = vec![InputItem::Text { text: prompt.clone() }];
+    let items: Vec<InputItem> = vec![InputItem::Text {
+        text: prompt.clone(),
+    }];
     #[cfg(feature = "otel")]
     let _us = tracing::info_span!(
         "user_message",
         role = "user",
         content = %prompt,
         message_type = "user_input"
-    ).entered();
-    let initial_prompt_task_id = codex.submit(Op::UserInput { items, span_context: None }).await?;
+    )
+    .entered();
+    let initial_prompt_task_id = codex
+        .submit(Op::UserInput {
+            items,
+            span_context: None,
+        })
+        .await?;
     info!("Sent prompt with event ID: {initial_prompt_task_id}");
 
     // Run the loop until the task is complete.

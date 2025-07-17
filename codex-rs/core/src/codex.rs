@@ -29,14 +29,14 @@ use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 use tracing::debug;
 
+#[cfg(feature = "otel")]
+use time;
+use tracing::Instrument;
 use tracing::error;
 use tracing::info;
 use tracing::trace;
 use tracing::warn;
-use tracing::Instrument;
 use uuid::Uuid;
-#[cfg(feature = "otel")]
-use time;
 
 use crate::WireApi;
 use crate::client::ModelClient;
@@ -90,9 +90,9 @@ use crate::rollout::RolloutRecorder;
 use crate::safety::SafetyCheck;
 use crate::safety::assess_command_safety;
 use crate::safety::assess_patch_safety;
+use crate::telemetry::TraceContext;
 use crate::telemetry::conversation_tracing;
 use crate::telemetry::truncate_content;
-use crate::telemetry::TraceContext;
 use crate::user_notification::UserNotification;
 use crate::util::backoff;
 
@@ -492,7 +492,13 @@ pub(crate) struct AgentTask {
 impl AgentTask {
     fn spawn(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) -> Self {
         let trace_context = None;
-        let handle = tokio::spawn(run_task_with_context(Arc::clone(&sess), sub_id.clone(), input, trace_context)).abort_handle();
+        let handle = tokio::spawn(run_task_with_context(
+            Arc::clone(&sess),
+            sub_id.clone(),
+            input,
+            trace_context,
+        ))
+        .abort_handle();
         Self {
             sess,
             sub_id,
@@ -502,14 +508,20 @@ impl AgentTask {
 
     // Updated to use the new TraceContext abstraction
     fn spawn_with_context(
-        sess: Arc<Session>, 
-        sub_id: String, 
+        sess: Arc<Session>,
+        sub_id: String,
         input: Vec<InputItem>,
-        span_context: Option<std::collections::HashMap<String, String>>
+        span_context: Option<std::collections::HashMap<String, String>>,
     ) -> Self {
         // Convert the raw context map to a TraceContext
         let trace_context = TraceContext::from_context_map(span_context);
-        let handle = tokio::spawn(run_task_with_context(Arc::clone(&sess), sub_id.clone(), input, Some(trace_context))).abort_handle();
+        let handle = tokio::spawn(run_task_with_context(
+            Arc::clone(&sess),
+            sub_id.clone(),
+            input,
+            Some(trace_context),
+        ))
+        .abort_handle();
         Self {
             sess,
             sub_id,
@@ -675,22 +687,29 @@ async fn submission_loop(
                 // from above.
                 let trace_id = std::env::var("CODEX_TRACE_ID").ok();
                 let rollout_recorder =
-                    match RolloutRecorder::new(&config, session_id, instructions.clone(), trace_id).await {
+                    match RolloutRecorder::new(&config, session_id, instructions.clone(), trace_id)
+                        .await
+                    {
                         Ok(r) => {
                             // Record session metadata in trace span when rollout is created
                             #[cfg(feature = "otel")]
                             {
                                 let current_span = tracing::Span::current();
                                 current_span.record("session_id", session_id.to_string().as_str());
-                                current_span.record("session_timestamp", 
-                                    time::OffsetDateTime::now_utc().to_string().as_str());
+                                current_span.record(
+                                    "session_timestamp",
+                                    time::OffsetDateTime::now_utc().to_string().as_str(),
+                                );
                                 if let Some(ref instructions) = instructions {
-                                    current_span.record("instructions", truncate_content(instructions).as_str());
+                                    current_span.record(
+                                        "instructions",
+                                        truncate_content(instructions).as_str(),
+                                    );
                                 }
                                 current_span.record("model", model.as_str());
                             }
                             Some(r)
-                        },
+                        }
                         Err(e) => {
                             warn!("failed to initialise rollout recorder: {e}");
                             None
@@ -735,7 +754,10 @@ async fn submission_loop(
                     }
                 }
             }
-            Op::UserInput { items, span_context: raw_span_context } => {
+            Op::UserInput {
+                items,
+                span_context: raw_span_context,
+            } => {
                 let sess = match sess.as_ref() {
                     Some(sess) => sess,
                     None => {
@@ -746,13 +768,17 @@ async fn submission_loop(
 
                 // attempt to inject input into current task
                 if let Err(items) = sess.inject_input(items) {
-                    // no current task, spawn a new one
+                    // no current task, spawn a new one, propagating trace context if present
                     #[cfg(feature = "otel")]
-                    let task = AgentTask::spawn_with_context(Arc::clone(sess), sub.id, items, raw_span_context);
-                    
+                    let task = AgentTask::spawn_with_context(
+                        Arc::clone(sess),
+                        sub.id,
+                        items,
+                        raw_span_context,
+                    );
+
                     #[cfg(not(feature = "otel"))]
                     let task = AgentTask::spawn(Arc::clone(sess), sub.id, items);
-                    
                     sess.set_task(task);
                 }
             }
@@ -845,23 +871,24 @@ async fn submission_loop(
 /// - If the model sends only an assistant message, we record it in the
 ///   conversation history and consider the task complete.
 async fn run_task_with_context(
-    sess: Arc<Session>, 
-    sub_id: String, 
+    sess: Arc<Session>,
+    sub_id: String,
     input: Vec<InputItem>,
-    trace_context: Option<TraceContext>
+    trace_context: Option<TraceContext>,
 ) {
     if input.is_empty() {
         return;
     }
-    
-    let user_message_content = input.iter()
+
+    let user_message_content = input
+        .iter()
         .filter_map(|item| match item {
             InputItem::Text { text } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
         .join(" ");
-    
+
     // Create user message span with proper context if available
     let user_span = match &trace_context {
         Some(ctx) => ctx.create_user_message_span(&user_message_content),
@@ -873,12 +900,13 @@ async fn run_task_with_context(
             }
         }
     };
-    
-    run_task_inner(sess, sub_id, input).instrument(user_span).await;
+
+    run_task_inner(sess, sub_id, input)
+        .instrument(user_span)
+        .await;
 }
 
 async fn run_task_inner(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) {
-    
     let event = Event {
         id: sub_id.clone(),
         msg: EventMsg::TaskStarted,
@@ -1196,9 +1224,9 @@ async fn try_run_turn(
 
     let llm_span = conversation_tracing::create_llm_request_span(
         sess.client.model(),
-        &sess.client.provider().name
+        &sess.client.provider().name,
     );
-    
+
     // Execute the entire LLM request handling within the LLM span
     async move {
         let mut stream = sess.client.clone().stream(&prompt).await?;
@@ -1265,7 +1293,9 @@ async fn try_run_turn(
             }
         }
         Ok(output)
-    }.instrument(llm_span).await
+    }
+    .instrument(llm_span)
+    .await
 }
 
 async fn handle_response_item(
@@ -1280,7 +1310,7 @@ async fn handle_response_item(
                 if let ContentItem::OutputText { text } = item {
                     let assistant_span = conversation_tracing::create_assistant_message_span();
                     assistant_span.record("content", truncate_content(&text).as_str());
-                    
+
                     async {
                         let event = Event {
                             id: sub_id.to_string(),
@@ -1316,7 +1346,7 @@ async fn handle_response_item(
             Some(
                 handle_function_call(sess, sub_id.to_string(), name, arguments, call_id)
                     .instrument(tool_span)
-                    .await
+                    .await,
             )
         }
         ResponseItem::LocalShellCall {
@@ -1328,7 +1358,7 @@ async fn handle_response_item(
             let LocalShellAction::Exec(action) = action;
             let cmd_str = action.command.join(" ");
             let tool_span = conversation_tracing::create_tool_call_span("shell", &cmd_str);
-            
+
             let params = ShellToolCallParams {
                 command: action.command,
                 workdir: action.working_directory,
@@ -1369,7 +1399,7 @@ async fn handle_response_item(
                 output_span.record("success", output.success.unwrap_or(false));
                 output_span.record("content_size", output.content.len());
                 output_span.record("content", truncate_content(&output.content).as_str());
-                
+
                 async {
                     debug!("unexpected FunctionCallOutput from stream");
                 }
@@ -1542,15 +1572,14 @@ async fn handle_container_exec_with_params(
         }
     };
 
-    sess
-        .notify_exec_command_begin(&sub_id, &call_id, &params)
+    sess.notify_exec_command_begin(&sub_id, &call_id, &params)
         .await;
 
     let span = conversation_tracing::create_exec_cmd_span(&params.command.join(" "));
-    
+
     // Record working directory info
     span.record("working_directory", params.cwd.to_string_lossy().as_ref());
-    
+
     // Instrument the exec command processing
     async move {
         let output_result = process_exec_tool_call(
@@ -1575,7 +1604,14 @@ async fn handle_container_exec_with_params(
                 tracing::Span::current().record("duration_ms", duration.as_millis() as u64);
                 tracing::Span::current().record("stdout_size", stdout.len());
                 tracing::Span::current().record("stderr_size", stderr.len());
-                tracing::Span::current().record("status", if exit_code == 0 { "completed" } else { "failed" });
+                tracing::Span::current().record(
+                    "status",
+                    if exit_code == 0 {
+                        "completed"
+                    } else {
+                        "failed"
+                    },
+                );
 
                 sess.notify_exec_command_end(&sub_id, &call_id, &stdout, &stderr, exit_code)
                     .await;

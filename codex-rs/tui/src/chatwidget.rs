@@ -38,6 +38,7 @@ use crate::bottom_pane::InputResult;
 use crate::conversation_history_widget::ConversationHistoryWidget;
 use crate::history_cell::PatchEventType;
 use crate::user_approval_widget::ApprovalRequest;
+use codex_core::telemetry::TraceContext;
 use codex_file_search::FileMatch;
 
 pub(crate) struct ChatWidget<'a> {
@@ -49,6 +50,7 @@ pub(crate) struct ChatWidget<'a> {
     config: Config,
     initial_user_message: Option<UserMessage>,
     token_usage: TokenUsage,
+    trace_context: TraceContext,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -85,6 +87,7 @@ impl ChatWidget<'_> {
         app_event_tx: AppEventSender,
         initial_prompt: Option<String>,
         initial_images: Vec<PathBuf>,
+        trace_context: TraceContext,
     ) -> Self {
         let (codex_op_tx, mut codex_op_rx) = unbounded_channel::<Op>();
 
@@ -135,6 +138,7 @@ impl ChatWidget<'_> {
                 initial_images,
             ),
             token_usage: TokenUsage::default(),
+            trace_context,
         }
     }
 
@@ -176,45 +180,27 @@ impl ChatWidget<'_> {
 
     fn submit_user_message(&mut self, user_message: UserMessage) {
         // Extract image paths before moving fields out of user_message
-        let UserMessage {
-            text,
-            image_paths,
-        } = user_message;
+        let UserMessage { text, image_paths } = user_message;
 
         let mut items = Vec::new();
         items.push(InputItem::Text { text: text.clone() });
         for path in &image_paths {
-            items.push(InputItem::LocalImage {
-                path: path.clone(),
-            });
+            items.push(InputItem::LocalImage { path: path.clone() });
         }
 
-        // Create a span for the user message with appropriate metadata
-        let image_count = image_paths.len();
-        let _enter = {
-            let user_span = tracing::info_span!(
-                "user_message",
-                content = %text,
-                message_type = "user_input",
-                image_count = image_count
-            );
-            user_span.entered()
-        };
-
-        // Create a trace context for propagating spans to the core
+        // Prepare span context derived from the root trace context so Core can
+        // attach child spans to it.
         #[cfg(feature = "otel")]
-        let span_context = {
-            // Use the new TraceContext abstraction to capture the current context
-            let trace_context = codex_core::telemetry::TraceContext::capture_current();
-            // Extract the inner map for serialization
-            trace_context.into_inner()
-        };
-        
+        let span_context = self.trace_context.clone().into_inner();
+
         #[cfg(not(feature = "otel"))]
         let span_context = None;
 
         self.codex_op_tx
-            .send(Op::UserInput { items, span_context })
+            .send(Op::UserInput {
+                items,
+                span_context,
+            })
             .unwrap_or_else(|e| {
                 tracing::error!("failed to send message: {e}");
             });
@@ -284,7 +270,7 @@ impl ChatWidget<'_> {
                 self.token_usage = add_token_usage(&self.token_usage, &token_usage);
                 self.bottom_pane
                     .set_token_usage(self.token_usage.clone(), self.config.model_context_window);
-                
+
                 // Token counts are now handled by core conversation spans via record_token_usage
                 // But we still record cumulative counts on the root TUI session span
                 tracing::Span::current().record("input_tokens", self.token_usage.input_tokens);

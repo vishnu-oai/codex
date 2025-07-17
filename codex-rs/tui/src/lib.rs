@@ -3,6 +3,8 @@
 // alternate‑screen mode starts; that file opts‑out locally via `allow`.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 use app::App;
+#[cfg(feature = "otel")]
+use codex_common::telemetry;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config_types::SandboxMode;
@@ -12,8 +14,6 @@ use codex_core::openai_api_key::set_openai_api_key;
 use codex_core::protocol::AskForApproval;
 use codex_core::util::is_inside_git_repo;
 use codex_login::try_read_openai_api_key;
-#[cfg(feature = "otel")]
-use codex_common::telemetry;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 
@@ -55,46 +55,37 @@ mod user_approval_widget;
 pub use cli::Cli;
 
 pub fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> std::io::Result<()> {
-    eprintln!("DEBUG: TUI run_main called");
-    
     // Initialize telemetry (OpenTelemetry tracing) with default auto-generated trace files
     // This must happen before any other tracing setup
     #[cfg(feature = "otel")]
     {
-        eprintln!("DEBUG: TUI telemetry initialization starting");
         telemetry::init_telemetry(telemetry::OtelConfig::default());
-        eprintln!("DEBUG: TUI telemetry initialized");
-    }
-    #[cfg(not(feature = "otel"))]
-    {
-        eprintln!("DEBUG: TUI otel feature NOT enabled");
     }
 
     // Create a root span for the TUI session to ensure traces are captured
     #[cfg(feature = "otel")]
-    let _root_span = {
+    let root_context = {
         let flags = std::env::args().collect::<Vec<_>>().join(" ");
-        
         let git_commit = codex_common::telemetry::get_git_commit();
-        eprintln!("DEBUG: TUI git commit: {}", git_commit);
-        
-        tracing::info_span!(
+
+        let root_span = tracing::info_span!(
             "codex_tui_session",
             git_commit = %git_commit,
             git_repository_url = env!("CARGO_PKG_REPOSITORY"),
             codex_version = env!("CARGO_PKG_VERSION"),
-            codex_flags = %flags,
-            input_tokens = tracing::field::Empty,
-            output_tokens = tracing::field::Empty,
-            total_tokens = tracing::field::Empty,
-            cached_input_tokens = tracing::field::Empty,
-            reasoning_output_tokens = tracing::field::Empty,
-            session_id = tracing::field::Empty,
-            session_timestamp = tracing::field::Empty,
-            instructions = tracing::field::Empty,
-            model = tracing::field::Empty
-        ).entered()
+            codex_flags = %flags
+        );
+
+        let _enter = root_span.enter();
+
+        // Capture the context to propagate to children, then let the span end.
+        let ctx = codex_core::telemetry::TraceContext::capture_current();
+        ctx
     };
+
+    // The root_context is empty when otel feature is disabled
+    #[cfg(not(feature = "otel"))]
+    let root_context = codex_core::telemetry::TraceContext::new();
 
     let (sandbox_mode, approval_policy) = if cli.full_auto {
         (
@@ -203,7 +194,14 @@ pub fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> std::io::
     let show_git_warning = !cli.skip_git_repo_check && !is_inside_git_repo(&config);
 
     tracing::info!("Starting TUI application");
-    try_run_ratatui_app(cli, config, show_login_screen, show_git_warning, log_rx);
+    try_run_ratatui_app(
+        cli,
+        config,
+        show_login_screen,
+        show_git_warning,
+        log_rx,
+        root_context,
+    );
     tracing::info!("TUI application finished");
     Ok(())
 }
@@ -218,8 +216,16 @@ fn try_run_ratatui_app(
     show_login_screen: bool,
     show_git_warning: bool,
     log_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    root_context: codex_core::telemetry::TraceContext,
 ) {
-    if let Err(report) = run_ratatui_app(cli, config, show_login_screen, show_git_warning, log_rx) {
+    if let Err(report) = run_ratatui_app(
+        cli,
+        config,
+        show_login_screen,
+        show_git_warning,
+        log_rx,
+        root_context,
+    ) {
         eprintln!("Error: {report:?}");
     }
 }
@@ -230,8 +236,8 @@ fn run_ratatui_app(
     show_login_screen: bool,
     show_git_warning: bool,
     mut log_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    root_context: codex_core::telemetry::TraceContext,
 ) -> color_eyre::Result<()> {
-    let _span = tracing::info_span!("run_ratatui_app").entered();
     color_eyre::install()?;
 
     // Forward panic reports through the tracing stack so that they appear in
@@ -250,6 +256,7 @@ fn run_ratatui_app(
         show_login_screen,
         show_git_warning,
         images,
+        root_context,
     );
 
     // Bridge log receiver into the AppEvent channel so latest log lines update the UI.

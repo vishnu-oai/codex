@@ -1,35 +1,53 @@
 // Removed fmt import since we no longer use stderr formatting
 
 #[cfg(feature = "otel")]
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Registry, Layer};
-#[cfg(feature = "otel")]
-use tracing_subscriber::filter::FilterFn;
+use opentelemetry::KeyValue;
 #[cfg(feature = "otel")]
 use opentelemetry::trace::TracerProvider;
 #[cfg(feature = "otel")]
-use opentelemetry::KeyValue;
+use opentelemetry_otlp::WithExportConfig;
 #[cfg(feature = "otel")]
-use opentelemetry_sdk::{trace as sdktrace, Resource};
+use opentelemetry_sdk::Resource;
+#[cfg(feature = "otel")]
+use opentelemetry_sdk::trace as sdktrace;
 #[cfg(feature = "otel")]
 use opentelemetry_stdout;
 #[cfg(feature = "otel")]
-use opentelemetry_otlp::WithExportConfig;
-#[cfg(feature = "otel")]
 use tracing_opentelemetry;
+#[cfg(feature = "otel")]
+use tracing_subscriber::Layer;
+#[cfg(feature = "otel")]
+use tracing_subscriber::Registry;
+#[cfg(feature = "otel")]
+use tracing_subscriber::filter::FilterFn;
+#[cfg(feature = "otel")]
+use tracing_subscriber::layer::SubscriberExt;
+#[cfg(feature = "otel")]
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[cfg(feature = "otel")]
-use opentelemetry_sdk::trace::{SpanExporter, SpanData};
+use opentelemetry_sdk::error::OTelSdkError;
 #[cfg(feature = "otel")]
-use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
+use opentelemetry_sdk::error::OTelSdkResult;
+#[cfg(feature = "otel")]
+use opentelemetry_sdk::trace::SpanData;
+#[cfg(feature = "otel")]
+use opentelemetry_sdk::trace::SpanExporter;
 
 #[cfg(feature = "otel")]
-use std::{
-    fs::{create_dir_all, OpenOptions},
-    io::Write,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::SystemTime,
-};
+use std::fs::OpenOptions;
+#[cfg(feature = "otel")]
+use std::fs::create_dir_all;
+#[cfg(feature = "otel")]
+use std::io::Write;
+#[cfg(feature = "otel")]
+use std::path::PathBuf;
+#[cfg(feature = "otel")]
+use std::sync::Arc;
+#[cfg(feature = "otel")]
+use std::sync::Mutex;
+#[cfg(feature = "otel")]
+use std::time::SystemTime;
 
 /// Configuration for initializing OpenTelemetry tracing.
 #[derive(Default)]
@@ -79,18 +97,25 @@ pub fn init_telemetry(_config: OtelConfig) {
 fn should_include_span(metadata: &tracing::Metadata) -> bool {
     let target = metadata.target();
     let name = metadata.name();
-    
+
     // ALWAYS include spans that match rollout event types
-    if matches!(name, 
-        "user_message" | "assistant_msg" | "tool_call" | "exec_cmd" | 
-        "function_call_output" | "codex_session" | 
-        "codex_tui_session" | "codex_proto_session" | "llm_request"
+    if matches!(
+        name,
+        "user_message"
+            | "assistant_msg"
+            | "tool_call"
+            | "exec_cmd"
+            | "function_call_output"
+            | "codex_session"
+            | "codex_tui_session"
+            | "codex_proto_session"
+            | "llm_request"
     ) {
         return true;
     }
-    
+
     // EXCLUDE noisy UI and third-party spans
-    if target.starts_with("tui_markdown") 
+    if target.starts_with("tui_markdown")
         || target.starts_with("crossterm")
         || target.starts_with("hyper_util")
         || target.contains("markdown")
@@ -108,9 +133,9 @@ fn should_include_span(metadata: &tracing::Metadata) -> bool {
     {
         return false;
     }
-    
+
     // Include core codex spans
-    target.starts_with("codex_") 
+    target.starts_with("codex_")
         || target.starts_with("exec")
         || target == "codex_core"
         || target.starts_with("codex_core")
@@ -119,16 +144,13 @@ fn should_include_span(metadata: &tracing::Metadata) -> bool {
 #[cfg(feature = "otel")]
 #[derive(Debug)]
 struct FileSpanExporter {
-    file: Arc<Mutex<std::fs::File>>, 
+    file: Arc<Mutex<std::fs::File>>,
 }
 
 #[cfg(feature = "otel")]
 impl FileSpanExporter {
     fn new(path: PathBuf) -> std::io::Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
             file: Arc::new(Mutex::new(file)),
         })
@@ -137,7 +159,10 @@ impl FileSpanExporter {
 
 #[cfg(feature = "otel")]
 impl SpanExporter for FileSpanExporter {
-    fn export(&self, batch: Vec<SpanData>) -> impl std::future::Future<Output = OTelSdkResult> + Send {
+    fn export(
+        &self,
+        batch: Vec<SpanData>,
+    ) -> impl std::future::Future<Output = OTelSdkResult> + Send {
         let file = self.file.clone();
         async move {
             let mut buf = String::new();
@@ -175,19 +200,18 @@ impl SpanExporter for FileSpanExporter {
 #[cfg(feature = "otel")]
 fn generate_default_trace_file() -> Option<String> {
     // Resolve CODEX_HOME (same logic as config loading)
-    let codex_home = std::env::var("CODEX_HOME").ok()
+    let codex_home = std::env::var("CODEX_HOME")
+        .ok()
         .map(PathBuf::from)
-        .or_else(|| {
-            dirs::home_dir().map(|home| home.join(".codex"))
-        })?;
-    
+        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))?;
+
     // Create traces directory if it doesn't exist
     let traces_dir = codex_home.join("traces");
     if let Err(e) = create_dir_all(&traces_dir) {
         eprintln!("Failed to create traces directory: {e}");
         return None;
     }
-    
+
     // Generate unique filename based on timestamp and process ID
     let timestamp = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -195,7 +219,7 @@ fn generate_default_trace_file() -> Option<String> {
         .as_secs();
     let pid = std::process::id();
     let filename = format!("codex-{}-{}.log", timestamp, pid);
-    
+
     let trace_file = traces_dir.join(filename);
     Some(format!("file://{}", trace_file.display()))
 }
@@ -204,7 +228,7 @@ fn generate_default_trace_file() -> Option<String> {
 #[cfg(feature = "otel")]
 pub fn init_telemetry(config: OtelConfig) {
     let explicit_target = config.target.is_some() || std::env::var("CODEX_OTEL").is_ok();
-    
+
     let target = config
         .target
         .or_else(|| std::env::var("CODEX_OTEL").ok())
@@ -214,7 +238,7 @@ pub fn init_telemetry(config: OtelConfig) {
     let Some(target) = target else {
         return;
     };
-    
+
     // Print the trace file location for user awareness
     if target.starts_with("file://") && !explicit_target {
         let path = target.trim_start_matches("file://");
@@ -233,7 +257,11 @@ pub fn init_telemetry(config: OtelConfig) {
 
     let sample_rate = config
         .sample_rate
-        .or_else(|| std::env::var("CODEX_OTEL_SAMPLE_RATE").ok().and_then(|v| v.parse().ok()))
+        .or_else(|| {
+            std::env::var("CODEX_OTEL_SAMPLE_RATE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
         .unwrap_or(1.0);
 
     static VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -271,7 +299,7 @@ pub fn init_telemetry(config: OtelConfig) {
                 opentelemetry::global::set_tracer_provider(provider.clone());
                 let tracer = provider.tracer("codex-cli");
                 let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-                
+
                 // Apply custom filtering to reduce noise
                 let filter = FilterFn::new(should_include_span);
 
@@ -294,7 +322,7 @@ pub fn init_telemetry(config: OtelConfig) {
         opentelemetry::global::set_tracer_provider(provider.clone());
         let tracer = provider.tracer("codex-cli");
         let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-        
+
         // Apply custom filtering to reduce noise
         let filter = FilterFn::new(should_include_span);
 
@@ -325,7 +353,7 @@ pub fn init_telemetry(config: OtelConfig) {
                 opentelemetry::global::set_tracer_provider(provider.clone());
                 let tracer = provider.tracer("codex-cli");
                 let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-                
+
                 // Apply custom filtering to reduce noise
                 let filter = FilterFn::new(should_include_span);
 
