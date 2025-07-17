@@ -7,17 +7,16 @@ use std::fs::File;
 use std::fs::{self};
 use std::io::Error as IoError;
 use std::path::Path;
-use std::process::Command;
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
 
 use serde::Serialize;
 use time::OffsetDateTime;
 use time::format_description::FormatItem;
 use time::macros::format_description;
 use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
 use tokio::sync::mpsc::Sender;
+use tokio::time::Duration as TokioDuration;
+use tokio::time::timeout;
 
 use uuid::Uuid;
 
@@ -51,25 +50,17 @@ struct SessionMeta {
 }
 
 /// Timeout for git commands to prevent freezing on large repositories
-const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
+const GIT_COMMAND_TIMEOUT: TokioDuration = TokioDuration::from_secs(3);
 
 /// Run a git command with a timeout to prevent blocking on large repositories
-fn run_git_command_with_timeout(args: &[&str], cwd: &Path) -> Option<std::process::Output> {
-    let (tx, rx) = mpsc::channel();
-    let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    let cwd_owned = cwd.to_path_buf();
+async fn run_git_command_with_timeout(args: &[&str], cwd: &Path) -> Option<std::process::Output> {
+    let result = timeout(
+        GIT_COMMAND_TIMEOUT,
+        Command::new("git").args(args).current_dir(cwd).output(),
+    )
+    .await;
 
-    // Spawn git command in a separate thread
-    thread::spawn(move || {
-        let result = Command::new("git")
-            .args(&args_owned)
-            .current_dir(&cwd_owned)
-            .output();
-        let _ = tx.send(result);
-    });
-
-    // Wait for result with timeout
-    match rx.recv_timeout(GIT_COMMAND_TIMEOUT) {
+    match result {
         Ok(Ok(output)) => Some(output),
         _ => None, // Timeout or error
     }
@@ -78,15 +69,24 @@ fn run_git_command_with_timeout(args: &[&str], cwd: &Path) -> Option<std::proces
 /// Collect git repository information from the given working directory using command-line git.
 /// Returns None if no git repository is found or if git operations fail.
 /// Uses timeouts to prevent freezing on large repositories.
-fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
-    // Check if we're in a git repository
+/// All git commands (except the initial repo check) run in parallel for better performance.
+async fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
+    // Check if we're in a git repository first
     let is_git_repo = run_git_command_with_timeout(&["rev-parse", "--git-dir"], cwd)
-        .map(|output| output.status.success())
-        .unwrap_or(false);
+        .await?
+        .status
+        .success();
 
     if !is_git_repo {
         return None;
     }
+
+    // Run all git info collection commands in parallel
+    let (commit_result, branch_result, url_result) = tokio::join!(
+        run_git_command_with_timeout(&["rev-parse", "HEAD"], cwd),
+        run_git_command_with_timeout(&["rev-parse", "--abbrev-ref", "HEAD"], cwd),
+        run_git_command_with_timeout(&["remote", "get-url", "origin"], cwd)
+    );
 
     let mut git_info = GitInfo {
         commit_hash: None,
@@ -94,8 +94,8 @@ fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
         repository_url: None,
     };
 
-    // Get current commit hash
-    if let Some(output) = run_git_command_with_timeout(&["rev-parse", "HEAD"], cwd) {
+    // Process commit hash
+    if let Some(output) = commit_result {
         if output.status.success() {
             if let Ok(hash) = String::from_utf8(output.stdout) {
                 git_info.commit_hash = Some(hash.trim().to_string());
@@ -103,9 +103,8 @@ fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
         }
     }
 
-    // Get current branch name
-    if let Some(output) = run_git_command_with_timeout(&["rev-parse", "--abbrev-ref", "HEAD"], cwd)
-    {
+    // Process branch name
+    if let Some(output) = branch_result {
         if output.status.success() {
             if let Ok(branch) = String::from_utf8(output.stdout) {
                 let branch = branch.trim();
@@ -116,8 +115,8 @@ fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
         }
     }
 
-    // Get repository URL from origin remote
-    if let Some(output) = run_git_command_with_timeout(&["remote", "get-url", "origin"], cwd) {
+    // Process repository URL
+    if let Some(output) = url_result {
         if output.status.success() {
             if let Ok(url) = String::from_utf8(output.stdout) {
                 git_info.repository_url = Some(url.trim().to_string());
@@ -167,7 +166,7 @@ impl RolloutRecorder {
             .map_err(|e| IoError::other(format!("failed to format timestamp: {e}")))?;
 
         // Collect git repository information
-        let git_info = collect_git_info(cwd);
+        let git_info = collect_git_info(cwd).await;
 
         let meta = SessionMeta {
             timestamp,
@@ -299,7 +298,7 @@ mod tests {
     use tempfile::TempDir;
 
     // Helper function to create a test git repository
-    fn create_test_git_repo(temp_dir: &TempDir) -> PathBuf {
+    async fn create_test_git_repo(temp_dir: &TempDir) -> PathBuf {
         let repo_path = temp_dir.path().to_path_buf();
 
         // Initialize git repo
@@ -307,6 +306,7 @@ mod tests {
             .args(["init"])
             .current_dir(&repo_path)
             .output()
+            .await
             .expect("Failed to init git repo");
 
         // Configure git user (required for commits)
@@ -314,12 +314,14 @@ mod tests {
             .args(["config", "user.name", "Test User"])
             .current_dir(&repo_path)
             .output()
+            .await
             .expect("Failed to set git user name");
 
         Command::new("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(&repo_path)
             .output()
+            .await
             .expect("Failed to set git user email");
 
         // Create a test file and commit it
@@ -330,30 +332,34 @@ mod tests {
             .args(["add", "."])
             .current_dir(&repo_path)
             .output()
+            .await
             .expect("Failed to add files");
 
         Command::new("git")
             .args(["commit", "-m", "Initial commit"])
             .current_dir(&repo_path)
             .output()
+            .await
             .expect("Failed to commit");
 
         repo_path
     }
 
-    #[test]
-    fn test_collect_git_info_non_git_directory() {
+    #[tokio::test]
+    async fn test_collect_git_info_non_git_directory() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let result = collect_git_info(temp_dir.path());
+        let result = collect_git_info(temp_dir.path()).await;
         assert!(result.is_none());
     }
 
-    #[test]
-    fn test_collect_git_info_git_repository() {
+    #[tokio::test]
+    async fn test_collect_git_info_git_repository() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let repo_path = create_test_git_repo(&temp_dir);
+        let repo_path = create_test_git_repo(&temp_dir).await;
 
-        let git_info = collect_git_info(&repo_path).expect("Should collect git info from repo");
+        let git_info = collect_git_info(&repo_path)
+            .await
+            .expect("Should collect git info from repo");
 
         // Should have commit hash
         assert!(git_info.commit_hash.is_some());
@@ -370,10 +376,10 @@ mod tests {
         // This is acceptable behavior
     }
 
-    #[test]
-    fn test_collect_git_info_with_remote() {
+    #[tokio::test]
+    async fn test_collect_git_info_with_remote() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let repo_path = create_test_git_repo(&temp_dir);
+        let repo_path = create_test_git_repo(&temp_dir).await;
 
         // Add a remote origin
         Command::new("git")
@@ -385,9 +391,12 @@ mod tests {
             ])
             .current_dir(&repo_path)
             .output()
+            .await
             .expect("Failed to add remote");
 
-        let git_info = collect_git_info(&repo_path).expect("Should collect git info from repo");
+        let git_info = collect_git_info(&repo_path)
+            .await
+            .expect("Should collect git info from repo");
 
         // Should have repository URL
         assert_eq!(
@@ -396,16 +405,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_collect_git_info_detached_head() {
+    #[tokio::test]
+    async fn test_collect_git_info_detached_head() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let repo_path = create_test_git_repo(&temp_dir);
+        let repo_path = create_test_git_repo(&temp_dir).await;
 
         // Get the current commit hash
         let output = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&repo_path)
             .output()
+            .await
             .expect("Failed to get HEAD");
         let commit_hash = String::from_utf8(output.stdout).unwrap().trim().to_string();
 
@@ -414,9 +424,12 @@ mod tests {
             .args(["checkout", &commit_hash])
             .current_dir(&repo_path)
             .output()
+            .await
             .expect("Failed to checkout commit");
 
-        let git_info = collect_git_info(&repo_path).expect("Should collect git info from repo");
+        let git_info = collect_git_info(&repo_path)
+            .await
+            .expect("Should collect git info from repo");
 
         // Should have commit hash
         assert!(git_info.commit_hash.is_some());
@@ -424,19 +437,22 @@ mod tests {
         assert!(git_info.branch.is_none());
     }
 
-    #[test]
-    fn test_collect_git_info_with_branch() {
+    #[tokio::test]
+    async fn test_collect_git_info_with_branch() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let repo_path = create_test_git_repo(&temp_dir);
+        let repo_path = create_test_git_repo(&temp_dir).await;
 
         // Create and checkout a new branch
         Command::new("git")
             .args(["checkout", "-b", "feature-branch"])
             .current_dir(&repo_path)
             .output()
+            .await
             .expect("Failed to create branch");
 
-        let git_info = collect_git_info(&repo_path).expect("Should collect git info from repo");
+        let git_info = collect_git_info(&repo_path)
+            .await
+            .expect("Should collect git info from repo");
 
         // Should have the new branch name
         assert_eq!(git_info.branch, Some("feature-branch".to_string()));
