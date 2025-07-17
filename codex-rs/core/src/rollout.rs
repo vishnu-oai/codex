@@ -8,6 +8,9 @@ use std::fs::{self};
 use std::io::Error as IoError;
 use std::path::Path;
 use std::process::Command;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -15,7 +18,7 @@ use time::format_description::FormatItem;
 use time::macros::format_description;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::mpsc::{self};
+
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -35,9 +38,6 @@ struct GitInfo {
     /// Repository URL (if available from remote)
     #[serde(skip_serializing_if = "Option::is_none")]
     repository_url: Option<String>,
-    /// Working directory status (clean/dirty)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    is_clean: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -50,14 +50,37 @@ struct SessionMeta {
     git: Option<GitInfo>,
 }
 
+/// Timeout for git commands to prevent freezing on large repositories
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Run a git command with a timeout to prevent blocking on large repositories
+fn run_git_command_with_timeout(args: &[&str], cwd: &Path) -> Option<std::process::Output> {
+    let (tx, rx) = mpsc::channel();
+    let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let cwd_owned = cwd.to_path_buf();
+    
+    // Spawn git command in a separate thread
+    thread::spawn(move || {
+        let result = Command::new("git")
+            .args(&args_owned)
+            .current_dir(&cwd_owned)
+            .output();
+        let _ = tx.send(result);
+    });
+    
+    // Wait for result with timeout
+    match rx.recv_timeout(GIT_COMMAND_TIMEOUT) {
+        Ok(Ok(output)) => Some(output),
+        _ => None, // Timeout or error
+    }
+}
+
 /// Collect git repository information from the given working directory using command-line git.
 /// Returns None if no git repository is found or if git operations fail.
+/// Uses timeouts to prevent freezing on large repositories.
 fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
     // Check if we're in a git repository
-    let is_git_repo = Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .current_dir(cwd)
-        .output()
+    let is_git_repo = run_git_command_with_timeout(&["rev-parse", "--git-dir"], cwd)
         .map(|output| output.status.success())
         .unwrap_or(false);
 
@@ -69,15 +92,10 @@ fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
         commit_hash: None,
         branch: None,
         repository_url: None,
-        is_clean: None,
     };
 
     // Get current commit hash
-    if let Ok(output) = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(cwd)
-        .output()
-    {
+    if let Some(output) = run_git_command_with_timeout(&["rev-parse", "HEAD"], cwd) {
         if output.status.success() {
             if let Ok(hash) = String::from_utf8(output.stdout) {
                 git_info.commit_hash = Some(hash.trim().to_string());
@@ -86,11 +104,7 @@ fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
     }
 
     // Get current branch name
-    if let Ok(output) = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(cwd)
-        .output()
-    {
+    if let Some(output) = run_git_command_with_timeout(&["rev-parse", "--abbrev-ref", "HEAD"], cwd) {
         if output.status.success() {
             if let Ok(branch) = String::from_utf8(output.stdout) {
                 let branch = branch.trim();
@@ -102,26 +116,11 @@ fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
     }
 
     // Get repository URL from origin remote
-    if let Ok(output) = Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(cwd)
-        .output()
-    {
+    if let Some(output) = run_git_command_with_timeout(&["remote", "get-url", "origin"], cwd) {
         if output.status.success() {
             if let Ok(url) = String::from_utf8(output.stdout) {
                 git_info.repository_url = Some(url.trim().to_string());
             }
-        }
-    }
-
-    // Check if working directory is clean (no staged or unstaged changes)
-    if let Ok(output) = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(cwd)
-        .output()
-    {
-        if output.status.success() {
-            git_info.is_clean = Some(output.stdout.is_empty());
         }
     }
 
@@ -138,7 +137,7 @@ fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
 /// $ fx ~/.codex/sessions/rollout-2025-05-07T17-24-21-5973b6c0-94b8-487b-a530-2aeb6098ae0e.jsonl
 /// ```
 #[derive(Clone)]
-pub(crate) struct RolloutRecorder {
+pub struct RolloutRecorder {
     tx: Sender<String>,
 }
 
@@ -179,7 +178,7 @@ impl RolloutRecorder {
         // A reasonably-sized bounded channel. If the buffer fills up the send
         // future will yield, which is fine – we only need to ensure we do not
         // perform *blocking* I/O on the caller's thread.
-        let (tx, mut rx) = mpsc::channel::<String>(256);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
 
         // Spawn a Tokio task that owns the file handle and performs async
         // writes. Using `tokio::fs::File` keeps everything on the async I/O
@@ -285,4 +284,200 @@ fn create_log_file(config: &Config, session_id: Uuid) -> std::io::Result<LogFile
         session_id,
         timestamp,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    use std::fs;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    // Helper function to create a test git repository
+    fn create_test_git_repo(temp_dir: &TempDir) -> PathBuf {
+        let repo_path = temp_dir.path().to_path_buf();
+
+        // Initialize git repo
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("Failed to init git repo");
+
+        // Configure git user (required for commits)
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("Failed to set git user name");
+
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("Failed to set git user email");
+
+        // Create a test file and commit it
+        let test_file = repo_path.join("test.txt");
+        fs::write(&test_file, "test content").expect("Failed to write test file");
+
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo_path)
+            .output()
+            .expect("Failed to add files");
+
+        Command::new("git")
+            .args(["commit", "-m", "Initial commit"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("Failed to commit");
+
+        repo_path
+    }
+
+    #[test]
+    fn test_collect_git_info_non_git_directory() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let result = collect_git_info(temp_dir.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_collect_git_info_git_repository() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let repo_path = create_test_git_repo(&temp_dir);
+
+        let git_info = collect_git_info(&repo_path).expect("Should collect git info from repo");
+
+        // Should have commit hash
+        assert!(git_info.commit_hash.is_some());
+        let commit_hash = git_info.commit_hash.unwrap();
+        assert_eq!(commit_hash.len(), 40); // SHA-1 hash should be 40 characters
+        assert!(commit_hash.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Should have branch (likely "main" or "master")
+        assert!(git_info.branch.is_some());
+        let branch = git_info.branch.unwrap();
+        assert!(branch == "main" || branch == "master");
+
+
+
+        // Repository URL might be None for local repos without remote
+        // This is acceptable behavior
+    }
+
+    #[test]
+    fn test_collect_git_info_with_remote() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let repo_path = create_test_git_repo(&temp_dir);
+
+        // Add a remote origin
+        Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/repo.git",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("Failed to add remote");
+
+        let git_info = collect_git_info(&repo_path).expect("Should collect git info from repo");
+
+        // Should have repository URL
+        assert_eq!(
+            git_info.repository_url,
+            Some("https://github.com/example/repo.git".to_string())
+        );
+    }
+
+    
+
+    #[test]
+    fn test_collect_git_info_detached_head() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let repo_path = create_test_git_repo(&temp_dir);
+
+        // Get the current commit hash
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("Failed to get HEAD");
+        let commit_hash = String::from_utf8(output.stdout).unwrap().trim().to_string();
+
+        // Checkout the commit directly (detached HEAD)
+        Command::new("git")
+            .args(["checkout", &commit_hash])
+            .current_dir(&repo_path)
+            .output()
+            .expect("Failed to checkout commit");
+
+        let git_info = collect_git_info(&repo_path).expect("Should collect git info from repo");
+
+        // Should have commit hash
+        assert!(git_info.commit_hash.is_some());
+        // Branch should be None for detached HEAD (since rev-parse --abbrev-ref HEAD returns "HEAD")
+        assert!(git_info.branch.is_none());
+    }
+
+    #[test]
+    fn test_collect_git_info_with_branch() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let repo_path = create_test_git_repo(&temp_dir);
+
+        // Create and checkout a new branch
+        Command::new("git")
+            .args(["checkout", "-b", "feature-branch"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("Failed to create branch");
+
+        let git_info = collect_git_info(&repo_path).expect("Should collect git info from repo");
+
+        // Should have the new branch name
+        assert_eq!(git_info.branch, Some("feature-branch".to_string()));
+    }
+
+    #[test]
+    fn test_git_info_serialization() {
+        let git_info = GitInfo {
+            commit_hash: Some("abc123def456".to_string()),
+            branch: Some("main".to_string()),
+            repository_url: Some("https://github.com/example/repo.git".to_string()),
+        };
+
+        let json = serde_json::to_string(&git_info).expect("Should serialize GitInfo");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse JSON");
+
+        assert_eq!(parsed["commit_hash"], "abc123def456");
+        assert_eq!(parsed["branch"], "main");
+        assert_eq!(
+            parsed["repository_url"],
+            "https://github.com/example/repo.git"
+        );
+    }
+
+    #[test]
+    fn test_git_info_serialization_with_nones() {
+        let git_info = GitInfo {
+            commit_hash: None,
+            branch: None,
+            repository_url: None,
+        };
+
+        let json = serde_json::to_string(&git_info).expect("Should serialize GitInfo");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse JSON");
+
+        // Fields with None values should be omitted due to skip_serializing_if
+        assert!(!parsed.as_object().unwrap().contains_key("commit_hash"));
+        assert!(!parsed.as_object().unwrap().contains_key("branch"));
+        assert!(!parsed.as_object().unwrap().contains_key("repository_url"));
+    }
 }
