@@ -58,7 +58,7 @@ fn run_git_command_with_timeout(args: &[&str], cwd: &Path) -> Option<std::proces
     let (tx, rx) = mpsc::channel();
     let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let cwd_owned = cwd.to_path_buf();
-    
+
     // Spawn git command in a separate thread
     thread::spawn(move || {
         let result = Command::new("git")
@@ -67,7 +67,7 @@ fn run_git_command_with_timeout(args: &[&str], cwd: &Path) -> Option<std::proces
             .output();
         let _ = tx.send(result);
     });
-    
+
     // Wait for result with timeout
     match rx.recv_timeout(GIT_COMMAND_TIMEOUT) {
         Ok(Ok(output)) => Some(output),
@@ -104,7 +104,8 @@ fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
     }
 
     // Get current branch name
-    if let Some(output) = run_git_command_with_timeout(&["rev-parse", "--abbrev-ref", "HEAD"], cwd) {
+    if let Some(output) = run_git_command_with_timeout(&["rev-parse", "--abbrev-ref", "HEAD"], cwd)
+    {
         if output.status.success() {
             if let Ok(branch) = String::from_utf8(output.stdout) {
                 let branch = branch.trim();
@@ -137,7 +138,7 @@ fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
 /// $ fx ~/.codex/sessions/rollout-2025-05-07T17-24-21-5973b6c0-94b8-487b-a530-2aeb6098ae0e.jsonl
 /// ```
 #[derive(Clone)]
-pub struct RolloutRecorder {
+pub(crate) struct RolloutRecorder {
     tx: Sender<String>,
 }
 
@@ -365,8 +366,6 @@ mod tests {
         let branch = git_info.branch.unwrap();
         assert!(branch == "main" || branch == "master");
 
-
-
         // Repository URL might be None for local repos without remote
         // This is acceptable behavior
     }
@@ -396,8 +395,6 @@ mod tests {
             Some("https://github.com/example/repo.git".to_string())
         );
     }
-
-    
 
     #[test]
     fn test_collect_git_info_detached_head() {
