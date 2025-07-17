@@ -185,6 +185,7 @@ impl EventProcessor {
                 ts_println!(self, "tokens used: {total_tokens}");
             }
             EventMsg::AgentMessage(AgentMessageEvent { message }) => {
+                // Assistant message tracing now handled by core conversation spans
                 ts_println!(
                     self,
                     "{}\n{message}",

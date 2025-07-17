@@ -109,6 +109,7 @@ async fn retries_on_early_close() {
 
     codex
         .submit(Op::UserInput {
+            span_context: None,
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],

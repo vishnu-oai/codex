@@ -12,6 +12,7 @@ use crate::slash_command::SlashCommand;
 use crate::tui;
 use codex_core::config::Config;
 use codex_core::protocol::Event;
+use codex_core::telemetry::TraceContext;
 use color_eyre::eyre::Result;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -49,6 +50,8 @@ pub(crate) struct App<'a> {
     /// Stored parameters needed to instantiate the ChatWidget later, e.g.,
     /// after dismissing the Git-repo warning.
     chat_args: Option<ChatWidgetArgs>,
+
+    trace_context: TraceContext,
 }
 
 /// Aggregate parameters needed to create a `ChatWidget`, as creation may be
@@ -58,6 +61,7 @@ struct ChatWidgetArgs {
     config: Config,
     initial_prompt: Option<String>,
     initial_images: Vec<PathBuf>,
+    trace_context: TraceContext,
 }
 
 impl<'a> App<'a> {
@@ -67,6 +71,7 @@ impl<'a> App<'a> {
         show_login_screen: bool,
         show_git_warning: bool,
         initial_images: Vec<std::path::PathBuf>,
+        trace_context: TraceContext,
     ) -> Self {
         let (app_event_tx, app_event_rx) = channel();
         let app_event_tx = AppEventSender::new(app_event_tx);
@@ -131,6 +136,7 @@ impl<'a> App<'a> {
                     config: config.clone(),
                     initial_prompt,
                     initial_images,
+                    trace_context: trace_context.clone(),
                 }),
             )
         } else if show_git_warning {
@@ -142,6 +148,7 @@ impl<'a> App<'a> {
                     config: config.clone(),
                     initial_prompt,
                     initial_images,
+                    trace_context: trace_context.clone(),
                 }),
             )
         } else {
@@ -150,6 +157,7 @@ impl<'a> App<'a> {
                 app_event_tx.clone(),
                 initial_prompt,
                 initial_images,
+                trace_context.clone(),
             );
             (
                 AppState::Chat {
@@ -167,6 +175,7 @@ impl<'a> App<'a> {
             config,
             file_search,
             chat_args,
+            trace_context,
         }
     }
 
@@ -244,6 +253,7 @@ impl<'a> App<'a> {
                             self.app_event_tx.clone(),
                             None,
                             Vec::new(),
+                            self.trace_context.clone(),
                         ));
                         self.app_state = AppState::Chat { widget: new_widget };
                         self.app_event_tx.send(AppEvent::Redraw);
@@ -329,6 +339,7 @@ impl<'a> App<'a> {
                         self.app_event_tx.clone(),
                         args.initial_prompt,
                         args.initial_images,
+                        args.trace_context,
                     ));
                     self.app_state = AppState::Chat { widget };
                     self.app_event_tx.send(AppEvent::Redraw);

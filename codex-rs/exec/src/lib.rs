@@ -7,7 +7,10 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub use cli::Cli;
+use codex_common::CliConfigOverrides;
+#[cfg(feature = "otel")]
+use codex_common::telemetry;
+use codex_core::Codex;
 use codex_core::codex_wrapper;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
@@ -25,6 +28,8 @@ use tracing::error;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+pub use cli::Cli;
+
 pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()> {
     let Cli {
         images,
@@ -39,7 +44,29 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         sandbox_mode: sandbox_mode_cli_arg,
         prompt,
         config_overrides,
+        #[cfg(feature = "otel")]
+        otel,
+        #[cfg(feature = "otel")]
+        otel_protocol,
+        #[cfg(feature = "otel")]
+        otel_sample_rate,
+        #[cfg(feature = "otel")]
+        otel_service_name,
     } = cli;
+
+    #[cfg(feature = "otel")]
+    telemetry::init_telemetry(telemetry::OtelConfig {
+        target: otel,
+        protocol: Some(format!("{}", otel_protocol.as_str())),
+        sample_rate: Some(otel_sample_rate),
+        service_name: otel_service_name,
+    });
+
+    #[cfg(not(feature = "otel"))]
+    {
+        // Initialize basic tracing without OpenTelemetry
+        let _ = tracing_subscriber::fmt().try_init();
+    }
 
     // Determine the prompt based on CLI arg and/or stdin.
     let prompt = match prompt {
@@ -115,6 +142,52 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     };
 
     let config = Config::load_with_cli_overrides(cli_kv_overrides, overrides)?;
+
+    #[cfg(feature = "otel")]
+    let git_commit = codex_common::telemetry::get_git_commit_from_dir(&config.cwd);
+    #[cfg(not(feature = "otel"))]
+    let git_commit = "unknown".to_string();
+
+    let flags = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
+
+    #[cfg(feature = "otel")]
+    let span = {
+        tracing::info_span!(
+            "codex_session",
+            git_commit = %git_commit,
+            git_repository_url = env!("CARGO_PKG_REPOSITORY"),
+            codex_config_model = %config.model,
+            codex_config_flags = %flags,
+            session_id = tracing::field::Empty,
+            session_timestamp = tracing::field::Empty,
+            instructions = tracing::field::Empty,
+            model = tracing::field::Empty
+        )
+    };
+
+    #[cfg(not(feature = "otel"))]
+    let span = tracing::info_span!(
+        "codex_session",
+        git_commit = %git_commit,
+        git_repository_url = env!("CARGO_PKG_REPOSITORY"),
+        codex_config_model = %config.model,
+        codex_config_flags = %flags
+    );
+
+    #[cfg(feature = "otel")]
+    let _trace_id = {
+        let trace_id = span
+            .id()
+            .map(|id| format!("{:x}", id.into_u64()))
+            .unwrap_or_else(|| "unknown".to_string());
+        unsafe {
+            std::env::set_var("CODEX_TRACE_ID", &trace_id);
+        }
+        trace_id
+    };
+
+    let _root_span = span.entered();
+
     let mut event_processor =
         EventProcessor::create_with_ansi(stdout_with_ansi, !config.hide_agent_reasoning);
     // Print the effective configuration and prompt so users can see what Codex
@@ -187,7 +260,12 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
             .into_iter()
             .map(|path| InputItem::LocalImage { path })
             .collect();
-        let initial_images_event_id = codex.submit(Op::UserInput { items }).await?;
+        let initial_images_event_id = codex
+            .submit(Op::UserInput {
+                items,
+                span_context: None,
+            })
+            .await?;
         info!("Sent images with event ID: {initial_images_event_id}");
         while let Ok(event) = codex.next_event().await {
             if event.id == initial_images_event_id
@@ -204,8 +282,23 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     }
 
     // Send the prompt.
-    let items: Vec<InputItem> = vec![InputItem::Text { text: prompt }];
-    let initial_prompt_task_id = codex.submit(Op::UserInput { items }).await?;
+    let items: Vec<InputItem> = vec![InputItem::Text {
+        text: prompt.clone(),
+    }];
+    #[cfg(feature = "otel")]
+    let _us = tracing::info_span!(
+        "user_message",
+        role = "user",
+        content = %prompt,
+        message_type = "user_input"
+    )
+    .entered();
+    let initial_prompt_task_id = codex
+        .submit(Op::UserInput {
+            items,
+            span_context: None,
+        })
+        .await?;
     info!("Sent prompt with event ID: {initial_prompt_task_id}");
 
     // Run the loop until the task is complete.

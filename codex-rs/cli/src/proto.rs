@@ -24,9 +24,24 @@ pub async fn run_main(opts: ProtoCli) -> anyhow::Result<()> {
         anyhow::bail!("Protocol mode expects stdin to be a pipe, not a terminal");
     }
 
+    // Initialize basic tracing for the protocol mode
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
+
+    // Create a root span for the protocol session
+    #[cfg(feature = "otel")]
+    let _root_span = {
+        let git_commit = codex_common::telemetry::get_git_commit();
+
+        tracing::info_span!(
+            "codex_proto_session",
+            git_commit = %git_commit,
+            git_repository_url = env!("CARGO_PKG_REPOSITORY"),
+            codex_version = env!("CARGO_PKG_VERSION")
+        )
+        .entered()
+    };
 
     let ProtoCli { config_overrides } = opts;
     let overrides_vec = config_overrides
