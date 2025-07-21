@@ -11,9 +11,29 @@ clap = { version = "4", features = ["derive", "wrap_help"], optional = true }
 codex-core = { path = "../core" }
 toml = { version = "0.9", optional = true }
 serde = { version = "1", optional = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+opentelemetry = { version = "0.30", optional = true }
+opentelemetry_sdk = { version = "0.30", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.30", optional = true, features = ["grpc-tonic"] }
+opentelemetry-stdout = { version = "0.30", features = ["trace"], optional = true }
+tracing-opentelemetry = { version = "0.31", optional = true }
+opentelemetry-proto   = { version = "0.30", features = ["tonic","serde"], optional = true }
+serde_json          = { version = "1",        optional = true }
+dirs = { version = "5.0", optional = true }
 
 [features]
 # Separate feature so that `clap` is not a mandatory dependency.
 cli = ["clap", "toml", "serde"]
 elapsed = []
 sandbox_summary = []
+otel = [
+    "opentelemetry", 
+    "opentelemetry_sdk", 
+    "opentelemetry-otlp",
+    "opentelemetry-stdout",
+    "tracing-opentelemetry",
+    "opentelemetry-proto",
+    "serde_json",
+    "dirs"
+]

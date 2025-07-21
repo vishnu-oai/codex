@@ -28,6 +28,10 @@ use tokio::sync::Notify;
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 use tracing::debug;
+
+#[cfg(feature = "otel")]
+use time;
+use tracing::Instrument;
 use tracing::error;
 use tracing::info;
 use tracing::trace;
@@ -88,6 +92,9 @@ use crate::rollout::RolloutRecorder;
 use crate::safety::SafetyCheck;
 use crate::safety::assess_command_safety;
 use crate::safety::assess_patch_safety;
+use crate::telemetry::TraceContext;
+use crate::telemetry::conversation_tracing;
+use crate::telemetry::truncate_content;
 use crate::user_notification::UserNotification;
 use crate::util::backoff;
 
@@ -497,8 +504,37 @@ pub(crate) struct AgentTask {
 
 impl AgentTask {
     fn spawn(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) -> Self {
-        let handle =
-            tokio::spawn(run_task(Arc::clone(&sess), sub_id.clone(), input)).abort_handle();
+        let trace_context = None;
+        let handle = tokio::spawn(run_task_with_context(
+            Arc::clone(&sess),
+            sub_id.clone(),
+            input,
+            trace_context,
+        ))
+        .abort_handle();
+        Self {
+            sess,
+            sub_id,
+            handle,
+        }
+    }
+
+    // Updated to use the new TraceContext abstraction
+    fn spawn_with_context(
+        sess: Arc<Session>,
+        sub_id: String,
+        input: Vec<InputItem>,
+        span_context: Option<std::collections::HashMap<String, String>>,
+    ) -> Self {
+        // Convert the raw context map to a TraceContext
+        let trace_context = TraceContext::from_context_map(span_context);
+        let handle = tokio::spawn(run_task_with_context(
+            Arc::clone(&sess),
+            sub_id.clone(),
+            input,
+            Some(trace_context),
+        ))
+        .abort_handle();
         Self {
             sess,
             sub_id,
@@ -662,11 +698,31 @@ async fn submission_loop(
                 // TODO: if ConfigureSession is sent twice, we will create an
                 // overlapping rollout file. Consider passing RolloutRecorder
                 // from above.
+                let trace_id = std::env::var("CODEX_TRACE_ID").ok();
                 let rollout_recorder =
-                    match RolloutRecorder::new(&config, session_id, instructions.clone(), &cwd)
+                    match RolloutRecorder::new(&config, session_id, instructions.clone(), &cwd, trace_id)
                         .await
                     {
-                        Ok(r) => Some(r),
+                        Ok(r) => {
+                            // Record session metadata in trace span when rollout is created
+                            #[cfg(feature = "otel")]
+                            {
+                                let current_span = tracing::Span::current();
+                                current_span.record("session_id", session_id.to_string().as_str());
+                                current_span.record(
+                                    "session_timestamp",
+                                    time::OffsetDateTime::now_utc().to_string().as_str(),
+                                );
+                                if let Some(ref instructions) = instructions {
+                                    current_span.record(
+                                        "instructions",
+                                        truncate_content(instructions).as_str(),
+                                    );
+                                }
+                                current_span.record("model", model.as_str());
+                            }
+                            Some(r)
+                        }
                         Err(e) => {
                             warn!("failed to initialise rollout recorder: {e}");
                             None
@@ -711,7 +767,10 @@ async fn submission_loop(
                     }
                 }
             }
-            Op::UserInput { items } => {
+            Op::UserInput {
+                items,
+                span_context: _raw_span_context,
+            } => {
                 let sess = match sess.as_ref() {
                     Some(sess) => sess,
                     None => {
@@ -722,7 +781,16 @@ async fn submission_loop(
 
                 // attempt to inject input into current task
                 if let Err(items) = sess.inject_input(items) {
-                    // no current task, spawn a new one
+                    // no current task, spawn a new one, propagating trace context if present
+                    #[cfg(feature = "otel")]
+                    let task = AgentTask::spawn_with_context(
+                        Arc::clone(sess),
+                        sub.id,
+                        items,
+                        raw_span_context,
+                    );
+
+                    #[cfg(not(feature = "otel"))]
                     let task = AgentTask::spawn(Arc::clone(sess), sub.id, items);
                     sess.set_task(task);
                 }
@@ -823,10 +891,43 @@ async fn submission_loop(
 ///   back to the model in the next turn.
 /// - If the model sends only an assistant message, we record it in the
 ///   conversation history and consider the task complete.
-async fn run_task(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) {
+async fn run_task_with_context(
+    sess: Arc<Session>,
+    sub_id: String,
+    input: Vec<InputItem>,
+    trace_context: Option<TraceContext>,
+) {
     if input.is_empty() {
         return;
     }
+
+    let user_message_content = input
+        .iter()
+        .filter_map(|item| match item {
+            InputItem::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // Create user message span with proper context if available
+    let user_span = match &trace_context {
+        Some(ctx) => ctx.create_user_message_span(&user_message_content),
+        None => {
+            if !user_message_content.is_empty() {
+                conversation_tracing::create_user_message_span(&user_message_content)
+            } else {
+                tracing::info_span!("user_message", content = "non-text-input")
+            }
+        }
+    };
+
+    run_task_inner(sess, sub_id, input)
+        .instrument(user_span)
+        .await;
+}
+
+async fn run_task_inner(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) {
     let event = Event {
         id: sub_id.clone(),
         msg: EventMsg::TaskStarted,
@@ -1175,69 +1276,94 @@ async fn try_run_turn(
         })
     };
 
-    let mut stream = sess.client.clone().stream(&prompt).await?;
+    let llm_span = conversation_tracing::create_llm_request_span(
+        sess.client.model(),
+        &sess.client.provider().name,
+    );
 
-    let mut output = Vec::new();
-    while let Some(Ok(event)) = stream.next().await {
-        match event {
-            ResponseEvent::Created => {
-                let mut state = sess.state.lock().unwrap();
-                // We successfully created a new response and ensured that all pending calls were included so we can clear the pending call ids.
-                state.pending_call_ids.clear();
-            }
-            ResponseEvent::OutputItemDone(item) => {
-                let call_id = match &item {
-                    ResponseItem::LocalShellCall {
-                        call_id: Some(call_id),
-                        ..
-                    } => Some(call_id),
-                    ResponseItem::FunctionCall { call_id, .. } => Some(call_id),
-                    _ => None,
-                };
-                if let Some(call_id) = call_id {
-                    // We just got a new call id so we need to make sure to respond to it in the next turn.
+    // Execute the entire LLM request handling within the LLM span
+    async move {
+        let mut stream = sess.client.clone().stream(&prompt).await?;
+
+        // Buffer all the incoming messages from the stream first, then execute them.
+        // If we execute a function call in the middle of handling the stream, it can time out.
+        let mut input = Vec::new();
+        while let Some(event) = stream.next().await {
+            input.push(event?);
+        }
+
+        let mut output = Vec::new();
+        for event in input {
+            match event {
+                ResponseEvent::Created => {
                     let mut state = sess.state.lock().unwrap();
-                    state.pending_call_ids.insert(call_id.clone());
+                    // We successfully created a new response and ensured that all pending calls were included so we can clear the pending call ids.
+                    state.pending_call_ids.clear();
                 }
-                let response = handle_response_item(sess, sub_id, item.clone()).await?;
+                ResponseEvent::OutputItemDone(item) => {
+                    let call_id = match &item {
+                        ResponseItem::LocalShellCall {
+                            call_id: Some(call_id),
+                            ..
+                        } => Some(call_id),
+                        ResponseItem::FunctionCall { call_id, .. } => Some(call_id),
+                        _ => None,
+                    };
+                    if let Some(call_id) = call_id {
+                        // We just got a new call id so we need to make sure to respond to it in the next turn.
+                        let mut state = sess.state.lock().unwrap();
+                        state.pending_call_ids.insert(call_id.clone());
+                    }
+                    let response = handle_response_item(sess, sub_id, item.clone()).await?;
 
-                output.push(ProcessedResponseItem { item, response });
-            }
-            ResponseEvent::Completed {
-                response_id,
-                token_usage,
-            } => {
-                if let Some(token_usage) = token_usage {
-                    sess.tx_event
-                        .send(Event {
-                            id: sub_id.to_string(),
-                            msg: EventMsg::TokenCount(token_usage),
-                        })
-                        .await
-                        .ok();
+                    output.push(ProcessedResponseItem { item, response });
                 }
+                ResponseEvent::Completed {
+                    response_id,
+                    token_usage,
+                } => {
+                    if let Some(token_usage) = token_usage {
+                        #[cfg(feature = "otel")]
+                        conversation_tracing::record_token_usage(
+                            token_usage.input_tokens,
+                            token_usage.output_tokens,
+                            token_usage.total_tokens,
+                            token_usage.cached_input_tokens,
+                            token_usage.reasoning_output_tokens,
+                        );
+                        sess.tx_event
+                            .send(Event {
+                                id: sub_id.to_string(),
+                                msg: EventMsg::TokenCount(token_usage),
+                            })
+                            .await
+                            .ok();
+                    }
 
-                let mut state = sess.state.lock().unwrap();
-                state.previous_response_id = Some(response_id);
-                break;
-            }
-            ResponseEvent::OutputTextDelta(delta) => {
-                let event = Event {
-                    id: sub_id.to_string(),
-                    msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }),
-                };
-                sess.tx_event.send(event).await.ok();
-            }
-            ResponseEvent::ReasoningSummaryDelta(delta) => {
-                let event = Event {
-                    id: sub_id.to_string(),
-                    msg: EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta }),
-                };
-                sess.tx_event.send(event).await.ok();
+                    let mut state = sess.state.lock().unwrap();
+                    state.previous_response_id = Some(response_id);
+                    break;
+                }
+                ResponseEvent::OutputTextDelta(delta) => {
+                    let event = Event {
+                        id: sub_id.to_string(),
+                        msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }),
+                    };
+                    sess.tx_event.send(event).await.ok();
+                }
+                ResponseEvent::ReasoningSummaryDelta(delta) => {
+                    let event = Event {
+                        id: sub_id.to_string(),
+                        msg: EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta }),
+                    };
+                    sess.tx_event.send(event).await.ok();
+                }
             }
         }
+        Ok(output)
     }
-    Ok(output)
+    .instrument(llm_span)
+    .await
 }
 
 async fn handle_response_item(
@@ -1250,11 +1376,18 @@ async fn handle_response_item(
         ResponseItem::Message { content, .. } => {
             for item in content {
                 if let ContentItem::OutputText { text } = item {
-                    let event = Event {
-                        id: sub_id.to_string(),
-                        msg: EventMsg::AgentMessage(AgentMessageEvent { message: text }),
-                    };
-                    sess.tx_event.send(event).await.ok();
+                    let assistant_span = conversation_tracing::create_assistant_message_span();
+                    assistant_span.record("content", truncate_content(&text).as_str());
+
+                    async {
+                        let event = Event {
+                            id: sub_id.to_string(),
+                            msg: EventMsg::AgentMessage(AgentMessageEvent { message: text }),
+                        };
+                        sess.tx_event.send(event).await.ok();
+                    }
+                    .instrument(assistant_span)
+                    .await;
                 }
             }
             None
@@ -1277,8 +1410,12 @@ async fn handle_response_item(
             arguments,
             call_id,
         } => {
-            info!("FunctionCall: {arguments}");
-            Some(handle_function_call(sess, sub_id.to_string(), name, arguments, call_id).await)
+            let tool_span = conversation_tracing::create_tool_call_span(&name, &arguments);
+            Some(
+                handle_function_call(sess, sub_id.to_string(), name, arguments, call_id)
+                    .instrument(tool_span)
+                    .await,
+            )
         }
         ResponseItem::LocalShellCall {
             id,
@@ -1287,7 +1424,9 @@ async fn handle_response_item(
             action,
         } => {
             let LocalShellAction::Exec(action) = action;
-            tracing::info!("LocalShellCall: {action:?}");
+            let cmd_str = action.command.join(" ");
+            let tool_span = conversation_tracing::create_tool_call_span("shell", &cmd_str);
+
             let params = ShellToolCallParams {
                 command: action.command,
                 workdir: action.working_directory,
@@ -1316,11 +1455,29 @@ async fn handle_response_item(
                     sub_id.to_string(),
                     effective_call_id,
                 )
+                .instrument(tool_span)
                 .await,
             )
         }
-        ResponseItem::FunctionCallOutput { .. } => {
-            debug!("unexpected FunctionCallOutput from stream");
+        ResponseItem::FunctionCallOutput { call_id: _, output: _ } => {
+            // Add tracing for function call outputs to match rollout
+            #[cfg(feature = "otel")]
+            {
+                let output_span = conversation_tracing::create_function_call_output_span(&call_id);
+                output_span.record("success", output.success.unwrap_or(false));
+                output_span.record("content_size", output.content.len());
+                output_span.record("content", truncate_content(&output.content).as_str());
+
+                async {
+                    debug!("unexpected FunctionCallOutput from stream");
+                }
+                .instrument(output_span)
+                .await;
+            }
+            #[cfg(not(feature = "otel"))]
+            {
+                debug!("unexpected FunctionCallOutput from stream");
+            }
             None
         }
         ResponseItem::UserFeedback { .. } => {
@@ -1490,56 +1647,79 @@ async fn handle_container_exec_with_params(
     sess.notify_exec_command_begin(&sub_id, &call_id, &params)
         .await;
 
-    let output_result = process_exec_tool_call(
-        params.clone(),
-        sandbox_type,
-        sess.ctrl_c.clone(),
-        &sess.sandbox_policy,
-        &sess.codex_linux_sandbox_exe,
-    )
-    .await;
+    let span = conversation_tracing::create_exec_cmd_span(&params.command.join(" "));
 
-    match output_result {
-        Ok(output) => {
-            let ExecToolCallOutput {
-                exit_code,
-                stdout,
-                stderr,
-                duration,
-            } = output;
+    // Record working directory info
+    span.record("working_directory", params.cwd.to_string_lossy().as_ref());
 
-            sess.notify_exec_command_end(&sub_id, &call_id, &stdout, &stderr, exit_code)
-                .await;
+    // Instrument the exec command processing
+    async move {
+        let output_result = process_exec_tool_call(
+            params.clone(),
+            sandbox_type,
+            sess.ctrl_c.clone(),
+            &sess.sandbox_policy,
+            &sess.codex_linux_sandbox_exe,
+        )
+        .await;
 
-            let is_success = exit_code == 0;
-            let content = format_exec_output(
-                if is_success { &stdout } else { &stderr },
-                exit_code,
-                duration,
-            );
+        match output_result {
+            Ok(output) => {
+                let ExecToolCallOutput {
+                    exit_code,
+                    stdout,
+                    stderr,
+                    duration,
+                } = output;
 
-            ResponseInputItem::FunctionCallOutput {
-                call_id,
-                output: FunctionCallOutputPayload {
-                    content,
-                    success: Some(is_success),
-                },
+                tracing::Span::current().record("exit_code", exit_code);
+                tracing::Span::current().record("duration_ms", duration.as_millis() as u64);
+                tracing::Span::current().record("stdout_size", stdout.len());
+                tracing::Span::current().record("stderr_size", stderr.len());
+                tracing::Span::current().record(
+                    "status",
+                    if exit_code == 0 {
+                        "completed"
+                    } else {
+                        "failed"
+                    },
+                );
+
+                sess.notify_exec_command_end(&sub_id, &call_id, &stdout, &stderr, exit_code)
+                    .await;
+
+                let is_success = exit_code == 0;
+                let content = format_exec_output(
+                    if is_success { &stdout } else { &stderr },
+                    exit_code,
+                    duration,
+                );
+
+                ResponseInputItem::FunctionCallOutput {
+                    call_id,
+                    output: FunctionCallOutputPayload {
+                        content,
+                        success: Some(is_success),
+                    },
+                }
             }
-        }
-        Err(CodexErr::Sandbox(error)) => {
-            handle_sandbox_error(error, sandbox_type, params, sess, sub_id, call_id).await
-        }
-        Err(e) => {
-            // Handle non-sandbox errors
-            ResponseInputItem::FunctionCallOutput {
-                call_id,
-                output: FunctionCallOutputPayload {
-                    content: format!("execution error: {e}"),
-                    success: None,
-                },
+            Err(CodexErr::Sandbox(error)) => {
+                handle_sandbox_error(error, sandbox_type, params, sess, sub_id, call_id).await
+            }
+            Err(e) => {
+                // Handle non-sandbox errors
+                ResponseInputItem::FunctionCallOutput {
+                    call_id,
+                    output: FunctionCallOutputPayload {
+                        content: format!("execution error: {e}"),
+                        success: None,
+                    },
+                }
             }
         }
     }
+    .instrument(span)
+    .await
 }
 
 async fn handle_sandbox_error(

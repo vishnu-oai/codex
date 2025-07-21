@@ -78,6 +78,7 @@ pub async fn run_codex_tool_session(
     let submission = Submission {
         id: sub_id,
         op: Op::UserInput {
+            span_context: None,
             items: vec![InputItem::Text {
                 text: initial_prompt.clone(),
             }],

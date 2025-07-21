@@ -3,6 +3,8 @@
 // alternate‑screen mode starts; that file opts‑out locally via `allow`.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 use app::App;
+#[cfg(feature = "otel")]
+use codex_common::telemetry;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config_types::SandboxMode;
@@ -12,11 +14,16 @@ use codex_core::openai_api_key::set_openai_api_key;
 use codex_core::protocol::AskForApproval;
 use codex_core::util::is_inside_git_repo;
 use codex_login::try_read_openai_api_key;
-use log_layer::TuiLogLayer;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
+
+#[cfg(not(feature = "otel"))]
+use log_layer::TuiLogLayer;
+#[cfg(not(feature = "otel"))]
 use tracing_appender::non_blocking;
+#[cfg(not(feature = "otel"))]
 use tracing_subscriber::EnvFilter;
+#[cfg(not(feature = "otel"))]
 use tracing_subscriber::prelude::*;
 
 mod app;
@@ -48,6 +55,38 @@ mod user_approval_widget;
 pub use cli::Cli;
 
 pub fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> std::io::Result<()> {
+    // Initialize telemetry (OpenTelemetry tracing) with default auto-generated trace files
+    // This must happen before any other tracing setup
+    #[cfg(feature = "otel")]
+    {
+        telemetry::init_telemetry(telemetry::OtelConfig::default());
+    }
+
+    // Create a root span for the TUI session to ensure traces are captured
+    #[cfg(feature = "otel")]
+    let root_context = {
+        let flags = std::env::args().collect::<Vec<_>>().join(" ");
+        let git_commit = codex_common::telemetry::get_git_commit();
+
+        let root_span = tracing::info_span!(
+            "codex_tui_session",
+            git_commit = %git_commit,
+            git_repository_url = env!("CARGO_PKG_REPOSITORY"),
+            codex_version = env!("CARGO_PKG_VERSION"),
+            codex_flags = %flags
+        );
+
+        let _enter = root_span.enter();
+
+        // Capture the context to propagate to children, then let the span end.
+        let ctx = codex_core::telemetry::TraceContext::capture_current();
+        ctx
+    };
+
+    // The root_context is empty when otel feature is disabled
+    #[cfg(not(feature = "otel"))]
+    let root_context = codex_core::telemetry::TraceContext::new();
+
     let (sandbox_mode, approval_policy) = if cli.full_auto {
         (
             Some(SandboxMode::WorkspaceWrite),
@@ -112,31 +151,39 @@ pub fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> std::io::
         log_file_opts.mode(0o600);
     }
 
-    let log_file = log_file_opts.open(log_dir.join("codex-tui.log"))?;
+    let _log_file = log_file_opts.open(log_dir.join("codex-tui.log"))?;
 
-    // Wrap file in non‑blocking writer.
-    let (non_blocking, _guard) = non_blocking(log_file);
-
-    // use RUST_LOG env var, default to info for codex crates.
-    let env_filter = || {
-        EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("codex_core=info,codex_tui=info"))
-    };
-
-    // Build layered subscriber:
-    let file_layer = tracing_subscriber::fmt::layer()
-        .with_writer(non_blocking)
-        .with_target(false)
-        .with_filter(env_filter());
-
-    // Channel that carries formatted log lines to the UI.
+    // Create log channel for UI display (used in both otel and non-otel cases)
     let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let tui_layer = TuiLogLayer::new(log_tx.clone(), 120).with_filter(env_filter());
 
-    let _ = tracing_subscriber::registry()
-        .with(file_layer)
-        .with(tui_layer)
-        .try_init();
+    // Only initialize tracing subscriber if telemetry hasn't already done it
+    #[cfg(not(feature = "otel"))]
+    {
+        // Set up logging for the TUI (both file and UI display)
+        let (non_blocking, _guard) = non_blocking(_log_file);
+
+        // use RUST_LOG env var, default to info for codex crates.
+        let env_filter = || {
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("codex_core=info,codex_tui=info"))
+        };
+
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_writer(non_blocking)
+            .with_target(false)
+            .with_filter(env_filter());
+
+        let tui_layer = TuiLogLayer::new(log_tx.clone(), 120).with_filter(env_filter());
+
+        let _ = tracing_subscriber::registry()
+            .with(file_layer)
+            .with(tui_layer)
+            .try_init();
+    }
+
+    // When OpenTelemetry is enabled, the telemetry module has already initialized the global subscriber
+    // We can't add more layers after that, but the telemetry traces will still be captured.
+    // The log_rx is still available for UI display purposes even though we don't actively send to log_tx.
 
     let show_login_screen = should_show_login_screen(&config);
 
@@ -146,7 +193,16 @@ pub fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> std::io::
     // `--allow-no-git-exec` flag.
     let show_git_warning = !cli.skip_git_repo_check && !is_inside_git_repo(&config);
 
-    try_run_ratatui_app(cli, config, show_login_screen, show_git_warning, log_rx);
+    tracing::info!("Starting TUI application");
+    try_run_ratatui_app(
+        cli,
+        config,
+        show_login_screen,
+        show_git_warning,
+        log_rx,
+        root_context,
+    );
+    tracing::info!("TUI application finished");
     Ok(())
 }
 
@@ -160,8 +216,16 @@ fn try_run_ratatui_app(
     show_login_screen: bool,
     show_git_warning: bool,
     log_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    root_context: codex_core::telemetry::TraceContext,
 ) {
-    if let Err(report) = run_ratatui_app(cli, config, show_login_screen, show_git_warning, log_rx) {
+    if let Err(report) = run_ratatui_app(
+        cli,
+        config,
+        show_login_screen,
+        show_git_warning,
+        log_rx,
+        root_context,
+    ) {
         eprintln!("Error: {report:?}");
     }
 }
@@ -172,6 +236,7 @@ fn run_ratatui_app(
     show_login_screen: bool,
     show_git_warning: bool,
     mut log_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    root_context: codex_core::telemetry::TraceContext,
 ) -> color_eyre::Result<()> {
     color_eyre::install()?;
 
@@ -191,6 +256,7 @@ fn run_ratatui_app(
         show_login_screen,
         show_git_warning,
         images,
+        root_context,
     );
 
     // Bridge log receiver into the AppEvent channel so latest log lines update the UI.

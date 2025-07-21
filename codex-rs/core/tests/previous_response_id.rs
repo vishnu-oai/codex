@@ -119,6 +119,7 @@ async fn keeps_previous_response_id_between_tasks() {
     // Task 1 – triggers first request (no previous_response_id)
     codex
         .submit(Op::UserInput {
+            span_context: None,
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
@@ -140,6 +141,7 @@ async fn keeps_previous_response_id_between_tasks() {
     // Task 2 – should include `previous_response_id` (triggers second request)
     codex
         .submit(Op::UserInput {
+            span_context: None,
             items: vec![InputItem::Text {
                 text: "again".into(),
             }],

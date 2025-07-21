@@ -64,6 +64,14 @@ impl ModelClient {
         }
     }
 
+    pub fn model(&self) -> &str {
+        &self.config.model
+    }
+
+    pub fn provider(&self) -> &ModelProviderInfo {
+        &self.provider
+    }
+
     /// Dispatches to either the Responses or Chat implementation depending on
     /// the provider config.  Public callers always invoke `stream()` – the
     /// specialised helpers are private to avoid accidental misuse.

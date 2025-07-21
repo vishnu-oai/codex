@@ -20,7 +20,7 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 codex-chatgpt = { path = "../chatgpt" }
 codex-core = { path = "../core" }
-codex-common = { path = "../common", features = ["cli"] }
+codex-common = { path = "../common", features = ["cli", "otel"] }
 codex-exec = { path = "../exec" }
 codex-login = { path = "../login" }
 codex-linux-sandbox = { path = "../linux-sandbox" }
@@ -36,3 +36,6 @@ tokio = { version = "1", features = [
 ] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
+
+[features]
+otel = ["codex-core/otel", "codex-exec/otel", "codex-tui/otel"]

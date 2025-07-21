@@ -48,6 +48,8 @@ struct SessionMeta {
     instructions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     git: Option<GitInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace_id: Option<String>,
 }
 
 /// Timeout for git commands to prevent freezing on large repositories
@@ -151,6 +153,7 @@ impl RolloutRecorder {
         uuid: Uuid,
         instructions: Option<String>,
         cwd: &Path,
+        trace_id: Option<String>,
     ) -> std::io::Result<Self> {
         let LogFileInfo {
             file,
@@ -174,6 +177,7 @@ impl RolloutRecorder {
             id: session_id.to_string(),
             instructions,
             git: git_info,
+            trace_id,
         };
 
         // A reasonably-sized bounded channel. If the buffer fills up the send

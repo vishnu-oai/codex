@@ -66,3 +66,16 @@ pretty_assertions = "1.4.1"
 tempfile = "3"
 tokio-test = "0.4"
 wiremock = "0.6"
+
+[features]
+default = []
+otel = ["opentelemetry", "opentelemetry_api"]
+
+[dependencies.opentelemetry]
+version = "0.20"
+features = ["trace"]
+optional = true
+
+[dependencies.opentelemetry_api]
+version = "0.20" 
+optional = true

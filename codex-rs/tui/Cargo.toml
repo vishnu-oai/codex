@@ -24,6 +24,7 @@ codex-common = { path = "../common", features = [
     "cli",
     "elapsed",
     "sandbox_summary",
+    "otel",
 ] }
 codex-file-search = { path = "../file-search" }
 codex-linux-sandbox = { path = "../linux-sandbox" }
@@ -63,3 +64,15 @@ uuid = "1"
 [dev-dependencies]
 insta = "1.43.1"
 pretty_assertions = "1"
+
+[features]
+otel = ["codex-common/otel", "codex-core/otel", "opentelemetry", "opentelemetry_api"]
+
+[dependencies.opentelemetry]
+version = "0.20"
+features = ["trace"]
+optional = true
+
+[dependencies.opentelemetry_api]
+version = "0.20" 
+optional = true
