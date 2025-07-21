@@ -71,21 +71,13 @@ impl RolloutRecorder {
             .format(timestamp_format)
             .map_err(|e| IoError::other(format!("failed to format timestamp: {e}")))?;
 
-        // Collect git repository information
-        let cwd = config.cwd.clone();
-        let git_info = collect_git_info(&cwd).await;
-
-        let meta = SessionMeta {
-            timestamp,
-            id: session_id.to_string(),
-            instructions,
-            git: git_info,
-        };
-
         // A reasonably-sized bounded channel. If the buffer fills up the send
         // future will yield, which is fine – we only need to ensure we do not
         // perform *blocking* I/O on the caller's thread.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
+
+        // Clone the cwd for the spawned task to collect git info asynchronously
+        let cwd = config.cwd.clone();
 
         // Spawn a Tokio task that owns the file handle and performs async
         // writes. Using `tokio::fs::File` keeps everything on the async I/O
@@ -93,6 +85,36 @@ impl RolloutRecorder {
         tokio::task::spawn(async move {
             let mut file = tokio::fs::File::from_std(file);
 
+            // Collect git repository information asynchronously without blocking startup
+            let git_info = collect_git_info(&cwd).await;
+
+            let meta = SessionMeta {
+                timestamp,
+                id: session_id.to_string(),
+                instructions,
+                git: git_info,
+            };
+
+            // Write the SessionMeta as the first item in the file
+            if let Ok(json) = serde_json::to_string(&meta) {
+                if let Err(e) = file.write_all(json.as_bytes()).await {
+                    tracing::warn!("rollout writer: failed to write SessionMeta: {e}");
+                    return;
+                }
+                if let Err(e) = file.write_all(b"\n").await {
+                    tracing::warn!("rollout writer: failed to write SessionMeta newline: {e}");
+                    return;
+                }
+                if let Err(e) = file.flush().await {
+                    tracing::warn!("rollout writer: failed to flush SessionMeta: {e}");
+                    return;
+                }
+            } else {
+                tracing::warn!("rollout writer: failed to serialize SessionMeta");
+                return;
+            }
+
+            // Now handle the regular stream of items
             while let Some(line) = rx.recv().await {
                 // Write line + newline, then flush to disk.
                 if let Err(e) = file.write_all(line.as_bytes()).await {
@@ -110,10 +132,7 @@ impl RolloutRecorder {
             }
         });
 
-        let recorder = Self { tx };
-        // Ensure SessionMeta is the first item in the file.
-        recorder.record_item(&meta).await?;
-        Ok(recorder)
+        Ok(Self { tx })
     }
 
     /// Append `items` to the rollout file.
@@ -146,6 +165,19 @@ impl RolloutRecorder {
         self.tx
             .send(json)
             .await
+            .map_err(|e| IoError::other(format!("failed to queue rollout item: {e}")))
+    }
+
+    /// Non-blocking version of record_item that returns immediately if the channel is full.
+    /// Returns Ok(()) if the item was queued successfully, or an Err if the channel is full or closed.
+    fn try_record_item(&self, item: &impl Serialize) -> std::io::Result<()> {
+        // Serialize the item to JSON first so that the writer thread only has
+        // to perform the actual write.
+        let json = serde_json::to_string(item)
+            .map_err(|e| IoError::other(format!("failed to serialize response items: {e}")))?;
+
+        self.tx
+            .try_send(json)
             .map_err(|e| IoError::other(format!("failed to queue rollout item: {e}")))
     }
 }
@@ -197,4 +229,34 @@ fn create_log_file(config: &Config, session_id: Uuid) -> std::io::Result<LogFile
 mod tests {
     #![allow(clippy::expect_used)]
     #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_try_record_item_non_blocking() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        
+        // Create a minimal config just for testing
+        let config = crate::config::ConfigToml::default();
+        let config = Config::load_from_base_config_with_overrides(
+            config,
+            crate::config::ConfigOverrides {
+                cwd: Some(temp_dir.path().to_path_buf()),
+                ..Default::default()
+            },
+            temp_dir.path().to_path_buf(),
+        ).expect("Failed to create config");
+
+        let recorder = RolloutRecorder::new(&config, uuid::Uuid::new_v4(), None)
+            .await
+            .expect("Failed to create recorder");
+
+        // Test that try_record_item doesn't block
+        let test_data = serde_json::json!({"test": "data"});
+        let result = recorder.try_record_item(&test_data);
+        
+        // Should succeed without blocking
+        assert!(result.is_ok());
+    }
 }

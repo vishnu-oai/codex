@@ -6,7 +6,7 @@ use tokio::time::Duration as TokioDuration;
 use tokio::time::timeout;
 
 /// Timeout for git commands to prevent freezing on large repositories
-const GIT_COMMAND_TIMEOUT: TokioDuration = TokioDuration::from_secs(3);
+const GIT_COMMAND_TIMEOUT: TokioDuration = TokioDuration::from_secs(5);
 
 #[derive(Serialize)]
 pub struct GitInfo {
