@@ -769,7 +769,7 @@ async fn submission_loop(
             }
             Op::UserInput {
                 items,
-                span_context: _raw_span_context,
+                span_context: raw_span_context,
             } => {
                 let sess = match sess.as_ref() {
                     Some(sess) => sess,
@@ -1459,7 +1459,7 @@ async fn handle_response_item(
                 .await,
             )
         }
-        ResponseItem::FunctionCallOutput { call_id: _, output: _ } => {
+        ResponseItem::FunctionCallOutput { call_id, output } => {
             // Add tracing for function call outputs to match rollout
             #[cfg(feature = "otel")]
             {
