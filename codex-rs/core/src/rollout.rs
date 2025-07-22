@@ -335,7 +335,4 @@ async fn rollout_writer(
 mod tests {
     #![allow(clippy::expect_used)]
     #![allow(clippy::unwrap_used)]
-
-    use super::*;
-    use tempfile::TempDir;
 }
