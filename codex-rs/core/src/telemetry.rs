@@ -226,7 +226,9 @@ pub mod conversation_tracing {
             stdout_size = tracing::field::Empty,
             stderr_size = tracing::field::Empty,
             status = tracing::field::Empty,
-            working_directory = tracing::field::Empty
+            working_directory = tracing::field::Empty,
+            stdout = tracing::field::Empty,
+            stderr = tracing::field::Empty
         )
     }
 

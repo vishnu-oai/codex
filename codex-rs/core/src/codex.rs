@@ -1697,6 +1697,8 @@ async fn handle_container_exec_with_params(
                         "failed"
                     },
                 );
+                tracing::Span::current().record("stdout", stdout.clone());
+                tracing::Span::current().record("stderr", stderr.clone());
 
                 sess.notify_exec_command_end(&sub_id, &call_id, &stdout, &stderr, exit_code)
                     .await;
