@@ -96,14 +96,15 @@ impl ChatWidget<'_> {
         // Create the Codex asynchronously so the UI loads as quickly as possible.
         let config_for_agent_loop = config.clone();
         tokio::spawn(async move {
-            let (codex, session_event, _ctrl_c) = match init_codex(config_for_agent_loop).await {
-                Ok(vals) => vals,
-                Err(e) => {
-                    // TODO: surface this error to the user.
-                    tracing::error!("failed to initialize codex: {e}");
-                    return;
-                }
-            };
+            let (codex, session_event, _ctrl_c, _session_id) =
+                match init_codex(config_for_agent_loop).await {
+                    Ok(vals) => vals,
+                    Err(e) => {
+                        // TODO: surface this error to the user.
+                        tracing::error!("failed to initialize codex: {e}");
+                        return;
+                    }
+                };
 
             // Forward the captured `SessionInitialized` event that was consumed
             // inside `init_codex()` so it can be rendered in the UI.
@@ -431,7 +432,7 @@ impl ChatWidget<'_> {
     }
 
     fn request_redraw(&mut self) {
-        self.app_event_tx.send(AppEvent::Redraw);
+        self.app_event_tx.send(AppEvent::RequestRedraw);
     }
 
     pub(crate) fn add_diff_output(&mut self, diff_output: String) {
@@ -464,6 +465,8 @@ impl ChatWidget<'_> {
         if self.bottom_pane.is_task_running() {
             self.bottom_pane.clear_ctrl_c_quit_hint();
             self.submit_op(Op::Interrupt);
+            self.answer_buffer.clear();
+            self.reasoning_buffer.clear();
             false
         } else if self.bottom_pane.ctrl_c_quit_hint_visible() {
             true
