@@ -186,8 +186,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
 
     let _root_span = span.entered();
 
-    let mut event_processor =
-        EventProcessor::create_with_ansi(stdout_with_ansi, &config);
+    let mut event_processor = EventProcessor::create_with_ansi(stdout_with_ansi, &config);
     // Print the effective configuration and prompt so users can see what Codex
     // is using.
     event_processor.print_config_summary(&config, &prompt);

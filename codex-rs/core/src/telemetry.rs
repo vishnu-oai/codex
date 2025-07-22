@@ -242,6 +242,16 @@ pub mod conversation_tracing {
         )
     }
 
+    /// Create a span for user feedback on approvals
+    pub fn create_user_feedback_span(call_id: &str, feedback: &str) -> Span {
+        info_span!(
+            "user_feedback",
+            call_id = call_id,
+            feedback = truncate_content(feedback),
+            feedback_type = "approval_response"
+        )
+    }
+
     /// Record token usage in the current span
     pub fn record_token_usage(
         input_tokens: u64,
@@ -295,6 +305,11 @@ pub mod conversation_tracing {
 
     /// Create a no-op function call output span when telemetry is disabled
     pub fn create_function_call_output_span(_call_id: &str) -> tracing::Span {
+        tracing::Span::none()
+    }
+
+    /// Create a no-op user feedback span when telemetry is disabled
+    pub fn create_user_feedback_span(_call_id: &str, _feedback: &str) -> tracing::Span {
         tracing::Span::none()
     }
 

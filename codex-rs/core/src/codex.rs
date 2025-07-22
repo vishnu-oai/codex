@@ -699,35 +699,40 @@ async fn submission_loop(
                 // overlapping rollout file. Consider passing RolloutRecorder
                 // from above.
                 let trace_id = std::env::var("CODEX_TRACE_ID").ok();
-                let rollout_recorder =
-                    match RolloutRecorder::new(&config, session_id, instructions.clone(), &cwd, trace_id)
-                        .await
-                    {
-                        Ok(r) => {
-                            // Record session metadata in trace span when rollout is created
-                            #[cfg(feature = "otel")]
-                            {
-                                let current_span = tracing::Span::current();
-                                current_span.record("session_id", session_id.to_string().as_str());
+                let rollout_recorder = match RolloutRecorder::new(
+                    &config,
+                    session_id,
+                    instructions.clone(),
+                    &cwd,
+                    trace_id,
+                )
+                .await
+                {
+                    Ok(r) => {
+                        // Record session metadata in trace span when rollout is created
+                        #[cfg(feature = "otel")]
+                        {
+                            let current_span = tracing::Span::current();
+                            current_span.record("session_id", session_id.to_string().as_str());
+                            current_span.record(
+                                "session_timestamp",
+                                time::OffsetDateTime::now_utc().to_string().as_str(),
+                            );
+                            if let Some(ref instructions) = instructions {
                                 current_span.record(
-                                    "session_timestamp",
-                                    time::OffsetDateTime::now_utc().to_string().as_str(),
+                                    "instructions",
+                                    truncate_content(instructions).as_str(),
                                 );
-                                if let Some(ref instructions) = instructions {
-                                    current_span.record(
-                                        "instructions",
-                                        truncate_content(instructions).as_str(),
-                                    );
-                                }
-                                current_span.record("model", model.as_str());
                             }
-                            Some(r)
+                            current_span.record("model", model.as_str());
                         }
-                        Err(e) => {
-                            warn!("failed to initialise rollout recorder: {e}");
-                            None
-                        }
-                    };
+                        Some(r)
+                    }
+                    Err(e) => {
+                        warn!("failed to initialise rollout recorder: {e}");
+                        None
+                    }
+                };
 
                 sess = Some(Arc::new(Session {
                     client,
@@ -1613,6 +1618,14 @@ async fn handle_container_exec_with_params(
                 )
                 .await;
             let Approval { decision, feedback } = rx_approve.await.unwrap_or_default();
+
+            // Add tracing for user feedback if feedback is provided
+            if let Some(ref user_feedback) = feedback {
+                let feedback_span =
+                    conversation_tracing::create_user_feedback_span(&call_id, user_feedback);
+                let _guard = feedback_span.enter();
+            }
+
             match decision {
                 ReviewDecision::Approved => (),
                 ReviewDecision::ApprovedForSession => {
@@ -1764,6 +1777,14 @@ async fn handle_sandbox_error(
         .await;
 
     let Approval { decision, feedback } = rx_approve.await.unwrap_or_default();
+
+    // Add tracing for user feedback if feedback is provided
+    if let Some(ref user_feedback) = feedback {
+        let feedback_span =
+            conversation_tracing::create_user_feedback_span(&call_id, user_feedback);
+        let _guard = feedback_span.enter();
+    }
+
     match decision {
         ReviewDecision::Approved | ReviewDecision::ApprovedForSession => {
             // Persist this command as pre‑approved for the
@@ -1873,6 +1894,13 @@ async fn apply_patch(
                 .request_patch_approval(sub_id.clone(), &action, None, None)
                 .await;
             let Approval { decision, feedback } = rx_approve.await.unwrap_or_default();
+
+            if let Some(ref user_feedback) = feedback {
+                let feedback_span =
+                    conversation_tracing::create_user_feedback_span(&call_id, user_feedback);
+                let _guard = feedback_span.enter();
+            }
+
             match decision {
                 ReviewDecision::Approved | ReviewDecision::ApprovedForSession => false,
                 ReviewDecision::Denied | ReviewDecision::Abort => {
@@ -1911,6 +1939,14 @@ async fn apply_patch(
             .request_patch_approval(sub_id.clone(), &action, reason.clone(), Some(root.clone()))
             .await;
         let Approval { decision, feedback } = rx.await.unwrap_or_default();
+
+        // Add tracing for user feedback if feedback is provided
+        if let Some(ref user_feedback) = feedback {
+            let feedback_span =
+                conversation_tracing::create_user_feedback_span(&call_id, user_feedback);
+            let _guard = feedback_span.enter();
+        }
+
         if !matches!(
             decision,
             ReviewDecision::Approved | ReviewDecision::ApprovedForSession
