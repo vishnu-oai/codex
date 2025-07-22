@@ -212,8 +212,6 @@ impl RolloutRecorder {
         info!("Resumed rollout successfully from {path:?}");
         Ok((Self { tx }, saved))
     }
-
-
 }
 
 struct LogFileInfo {
@@ -340,6 +338,4 @@ mod tests {
 
     use super::*;
     use tempfile::TempDir;
-
-
 }
