@@ -29,8 +29,14 @@ pub struct SessionMeta {
     pub id: Uuid,
     pub timestamp: String,
     pub instructions: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SessionMetaWithGit {
+    #[serde(flatten)]
+    meta: SessionMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub git: Option<GitInfo>,
+    git: Option<GitInfo>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -108,9 +114,8 @@ impl RolloutRecorder {
                 timestamp,
                 id: session_id,
                 instructions,
-                git: None, // Will be collected asynchronously in rollout_writer
             }),
-            Some(cwd),
+            cwd,
         ));
 
         Ok(Self { tx })
@@ -149,7 +154,7 @@ impl RolloutRecorder {
             .map_err(|e| IoError::other(format!("failed to queue rollout state: {e}")))
     }
 
-    pub async fn resume(path: &Path) -> std::io::Result<(Self, SavedSession)> {
+    pub async fn resume(path: &Path, cwd: std::path::PathBuf) -> std::io::Result<(Self, SavedSession)> {
         info!("Resuming rollout from {path:?}");
         let text = tokio::fs::read_to_string(path).await?;
         let mut lines = text.lines();
@@ -207,7 +212,7 @@ impl RolloutRecorder {
             tokio::fs::File::from_std(file),
             rx,
             None,
-            None,
+            cwd,
         ));
         info!("Resumed rollout successfully from {path:?}");
         Ok((Self { tx }, saved))
@@ -263,28 +268,18 @@ async fn rollout_writer(
     mut file: tokio::fs::File,
     mut rx: mpsc::Receiver<RolloutCmd>,
     mut meta: Option<SessionMeta>,
-    cwd: Option<std::path::PathBuf>,
+    cwd: std::path::PathBuf,
 ) {
-    // If we have a meta and cwd, collect git info asynchronously and write meta first
-    if let (Some(mut session_meta), Some(cwd)) = (meta.take(), cwd) {
-        // Skip git collection if disabled via environment variable (for tests)
-        let git_info = if std::env::var("CODEX_DISABLE_GIT_INFO").is_ok() {
-            None
-        } else {
-            // Collect git repository information asynchronously without blocking startup
-            collect_git_info(&cwd).await
+    // If we have a meta, collect git info asynchronously and write meta first
+    if let Some(session_meta) = meta.take() {
+        let git_info = collect_git_info(&cwd).await;
+        let session_meta_with_git = SessionMetaWithGit {
+            meta: session_meta,
+            git: git_info,
         };
-        session_meta.git = git_info;
 
         // Write the SessionMeta as the first item in the file
-        if let Ok(json) = serde_json::to_string(&session_meta) {
-            let _ = file.write_all(json.as_bytes()).await;
-            let _ = file.write_all(b"\n").await;
-            let _ = file.flush().await;
-        }
-    } else if let Some(session_meta) = meta {
-        // Write session meta without git info (for resumed sessions)
-        if let Ok(json) = serde_json::to_string(&session_meta) {
+        if let Ok(json) = serde_json::to_string(&session_meta_with_git) {
             let _ = file.write_all(json.as_bytes()).await;
             let _ = file.write_all(b"\n").await;
             let _ = file.flush().await;

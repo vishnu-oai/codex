@@ -22,20 +22,6 @@ pub struct GitInfo {
     pub repository_url: Option<String>,
 }
 
-/// Run a git command with a timeout to prevent blocking on large repositories
-async fn run_git_command_with_timeout(args: &[&str], cwd: &Path) -> Option<std::process::Output> {
-    let result = timeout(
-        GIT_COMMAND_TIMEOUT,
-        Command::new("git").args(args).current_dir(cwd).output(),
-    )
-    .await;
-
-    match result {
-        Ok(Ok(output)) => Some(output),
-        _ => None, // Timeout or error
-    }
-}
-
 /// Collect git repository information from the given working directory using command-line git.
 /// Returns None if no git repository is found or if git operations fail.
 /// Uses timeouts to prevent freezing on large repositories.
@@ -95,6 +81,20 @@ pub async fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
     }
 
     Some(git_info)
+}
+
+/// Run a git command with a timeout to prevent blocking on large repositories
+async fn run_git_command_with_timeout(args: &[&str], cwd: &Path) -> Option<std::process::Output> {
+    let result = timeout(
+        GIT_COMMAND_TIMEOUT,
+        Command::new("git").args(args).current_dir(cwd).output(),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(output)) => Some(output),
+        _ => None, // Timeout or error
+    }
 }
 
 #[cfg(test)]

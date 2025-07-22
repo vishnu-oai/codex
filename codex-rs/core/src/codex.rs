@@ -605,7 +605,7 @@ async fn submission_loop(
                 let mut restored_prev_id: Option<String> = None;
                 let rollout_recorder: Option<RolloutRecorder> =
                     if let Some(path) = resume_path.as_ref() {
-                        match RolloutRecorder::resume(path).await {
+                        match RolloutRecorder::resume(path, cwd.clone()).await {
                             Ok((rec, saved)) => {
                                 session_id = saved.session_id;
                                 restored_prev_id = saved.state.previous_response_id;

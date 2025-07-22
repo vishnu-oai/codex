@@ -123,7 +123,7 @@ async fn responses_api_stream_cli() {
 }
 
 /// End-to-end: create a session (writes rollout), verify the file, then resume and confirm append.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn integration_creates_and_checks_session_file() {
     // Honor sandbox network restrictions for CI parity with the other tests.
     if std::env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
@@ -161,9 +161,7 @@ async fn integration_creates_and_checks_session_file() {
         .env("OPENAI_API_KEY", "dummy")
         .env("CODEX_RS_SSE_FIXTURE", &fixture)
         // Required for CLI arg parsing even though fixture short-circuits network usage.
-        .env("OPENAI_BASE_URL", "http://unused.local")
-        // Disable git info collection to avoid blocking message processing in tests
-        .env("CODEX_DISABLE_GIT_INFO", "1");
+        .env("OPENAI_BASE_URL", "http://unused.local");
 
     let output = cmd.output().unwrap();
     assert!(
@@ -330,9 +328,8 @@ async fn integration_creates_and_checks_session_file() {
     cmd2.env("CODEX_HOME", home.path())
         .env("OPENAI_API_KEY", "dummy")
         .env("CODEX_RS_SSE_FIXTURE", &fixture)
-        .env("OPENAI_BASE_URL", "http://unused.local")
-        // Disable git info collection to avoid blocking message processing in tests
-        .env("CODEX_DISABLE_GIT_INFO", "1");
+        .env("OPENAI_BASE_URL", "http://unused.local");
+
     let output2 = cmd2.output().unwrap();
     assert!(output2.status.success(), "resume codex-cli run failed");
 
