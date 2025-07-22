@@ -62,6 +62,8 @@ async fn chat_mode_stream_cli() {
         .arg(&provider_override)
         .arg("-c")
         .arg("model_provider=\"mock\"")
+        .arg("-c")
+        .arg("experimental_disable_git_metadata=true")
         .arg("-C")
         .arg(env!("CARGO_MANIFEST_DIR"))
         .arg("hello?");
@@ -108,6 +110,8 @@ async fn responses_api_stream_cli() {
         .arg("--")
         .arg("exec")
         .arg("--skip-git-repo-check")
+        .arg("-c")
+        .arg("experimental_disable_git_metadata=true")
         .arg("-C")
         .arg(env!("CARGO_MANIFEST_DIR"))
         .arg("hello?");
@@ -154,6 +158,8 @@ async fn integration_creates_and_checks_session_file() {
         .arg("--")
         .arg("exec")
         .arg("--skip-git-repo-check")
+        .arg("-c")
+        .arg("experimental_disable_git_metadata=true")
         .arg("-C")
         .arg(env!("CARGO_MANIFEST_DIR"))
         .arg(&prompt);
@@ -322,6 +328,8 @@ async fn integration_creates_and_checks_session_file() {
         .arg("--skip-git-repo-check")
         .arg("-c")
         .arg(&resume_override)
+        .arg("-c")
+        .arg("experimental_disable_git_metadata=true")
         .arg("-C")
         .arg(env!("CARGO_MANIFEST_DIR"))
         .arg(&prompt2);
