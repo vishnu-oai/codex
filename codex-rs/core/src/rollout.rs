@@ -203,32 +203,17 @@ impl RolloutRecorder {
             .open(path)?;
 
         let (tx, rx) = mpsc::channel::<RolloutCmd>(256);
-        tokio::task::spawn(rollout_writer(tokio::fs::File::from_std(file), rx, None, None));
+        tokio::task::spawn(rollout_writer(
+            tokio::fs::File::from_std(file),
+            rx,
+            None,
+            None,
+        ));
         info!("Resumed rollout successfully from {path:?}");
         Ok((Self { tx }, saved))
     }
 
-    /// Non-blocking version of record_item that returns immediately if the channel is full.
-    /// Returns Ok(()) if the item was queued successfully, or an Err if the channel is full or closed.
-    fn try_record_item(&self, item: &impl Serialize) -> std::io::Result<()> {
-        // Serialize the item to JSON first so that the writer thread only has
-        // to perform the actual write.
-        let _json = serde_json::to_string(item)
-            .map_err(|e| IoError::other(format!("failed to serialize response items: {e}")))?;
 
-        // For the new command-based system, we need to adapt this to work with RolloutCmd
-        // This is a simple implementation that creates a single-item AddItems command
-        let cmd = RolloutCmd::AddItems(vec![
-            // This is a bit of a hack since we need a ResponseItem, but this method
-            // takes a generic Serialize. In practice, this method might not be needed
-            // in the new system or should be adapted.
-            ResponseItem::Other
-        ]);
-
-        self.tx
-            .try_send(cmd)
-            .map_err(|e| IoError::other(format!("failed to queue rollout item: {e}")))
-    }
 }
 
 struct LogFileInfo {
@@ -284,8 +269,13 @@ async fn rollout_writer(
 ) {
     // If we have a meta and cwd, collect git info asynchronously and write meta first
     if let (Some(mut session_meta), Some(cwd)) = (meta.take(), cwd) {
-        // Collect git repository information asynchronously without blocking startup
-        let git_info = collect_git_info(&cwd).await;
+        // Skip git collection if disabled via environment variable (for tests)
+        let git_info = if std::env::var("CODEX_DISABLE_GIT_INFO").is_ok() {
+            None
+        } else {
+            // Collect git repository information asynchronously without blocking startup
+            collect_git_info(&cwd).await
+        };
         session_meta.git = git_info;
 
         // Write the SessionMeta as the first item in the file
@@ -351,30 +341,5 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    #[tokio::test]
-    async fn test_try_record_item_non_blocking() {
-        let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        
-        // Create a minimal config just for testing
-        let config = crate::config::ConfigToml::default();
-        let config = Config::load_from_base_config_with_overrides(
-            config,
-            crate::config::ConfigOverrides {
-                cwd: Some(temp_dir.path().to_path_buf()),
-                ..Default::default()
-            },
-            temp_dir.path().to_path_buf(),
-        ).expect("Failed to create config");
 
-        let recorder = RolloutRecorder::new(&config, uuid::Uuid::new_v4(), None)
-            .await
-            .expect("Failed to create recorder");
-
-        // Test that try_record_item doesn't block
-        let test_data = serde_json::json!({"test": "data"});
-        let result = recorder.try_record_item(&test_data);
-        
-        // Should succeed without blocking
-        assert!(result.is_ok());
-    }
 }
