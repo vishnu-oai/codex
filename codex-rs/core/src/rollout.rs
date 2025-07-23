@@ -119,8 +119,7 @@ impl RolloutRecorder {
                 ResponseItem::Message { .. }
                 | ResponseItem::LocalShellCall { .. }
                 | ResponseItem::FunctionCall { .. }
-                | ResponseItem::FunctionCallOutput { .. }
-                | ResponseItem::UserFeedback { .. } => filtered.push(item.clone()),
+                | ResponseItem::FunctionCallOutput { .. } => filtered.push(item.clone()),
                 ResponseItem::Reasoning { .. } | ResponseItem::Other => {
                     // These should never be serialized.
                     continue;
@@ -178,8 +177,7 @@ impl RolloutRecorder {
                     ResponseItem::Message { .. }
                     | ResponseItem::LocalShellCall { .. }
                     | ResponseItem::FunctionCall { .. }
-                    | ResponseItem::FunctionCallOutput { .. }
-                    | ResponseItem::UserFeedback { .. } => items.push(item),
+                    | ResponseItem::FunctionCallOutput { .. } => items.push(item),
                     ResponseItem::Reasoning { .. } | ResponseItem::Other => {}
                 }
             }
@@ -269,8 +267,7 @@ async fn rollout_writer(
                         ResponseItem::Message { .. }
                         | ResponseItem::LocalShellCall { .. }
                         | ResponseItem::FunctionCall { .. }
-                        | ResponseItem::FunctionCallOutput { .. }
-                        | ResponseItem::UserFeedback { .. } => {
+                        | ResponseItem::FunctionCallOutput { .. } => {
                             if let Ok(json) = serde_json::to_string(&item) {
                                 let _ = file.write_all(json.as_bytes()).await;
                                 let _ = file.write_all(b"\n").await;

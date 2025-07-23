@@ -961,49 +961,35 @@ async fn run_task(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) {
                         }
                         (
                             ResponseItem::LocalShellCall { .. },
-                            Some(ResponseInputItem::FunctionCallOutput { call_id, output }),
+                            Some(ResponseInputItem::FunctionCallOutput {
+                                call_id,
+                                output,
+                                is_user_feedback,
+                            }),
                         ) => {
                             items_to_record_in_conversation_history.push(item);
                             items_to_record_in_conversation_history.push(
                                 ResponseItem::FunctionCallOutput {
                                     call_id: call_id.clone(),
                                     output: output.clone(),
-                                },
-                            );
-                        }
-                        (
-                            ResponseItem::LocalShellCall { .. },
-                            Some(ResponseInputItem::UserFeedback { call_id, feedback }),
-                        ) => {
-                            items_to_record_in_conversation_history.push(item);
-                            items_to_record_in_conversation_history.push(
-                                ResponseItem::UserFeedback {
-                                    call_id: call_id.clone(),
-                                    feedback: feedback.clone(),
+                                    is_user_feedback: *is_user_feedback,
                                 },
                             );
                         }
                         (
                             ResponseItem::FunctionCall { .. },
-                            Some(ResponseInputItem::FunctionCallOutput { call_id, output }),
+                            Some(ResponseInputItem::FunctionCallOutput {
+                                call_id,
+                                output,
+                                is_user_feedback,
+                            }),
                         ) => {
                             items_to_record_in_conversation_history.push(item);
                             items_to_record_in_conversation_history.push(
                                 ResponseItem::FunctionCallOutput {
                                     call_id: call_id.clone(),
                                     output: output.clone(),
-                                },
-                            );
-                        }
-                        (
-                            ResponseItem::FunctionCall { .. },
-                            Some(ResponseInputItem::UserFeedback { call_id, feedback }),
-                        ) => {
-                            items_to_record_in_conversation_history.push(item);
-                            items_to_record_in_conversation_history.push(
-                                ResponseItem::UserFeedback {
-                                    call_id: call_id.clone(),
-                                    feedback: feedback.clone(),
+                                    is_user_feedback: *is_user_feedback,
                                 },
                             );
                         }
@@ -1030,18 +1016,26 @@ async fn run_task(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) {
                                 ResponseItem::FunctionCallOutput {
                                     call_id: call_id.clone(),
                                     output: FunctionCallOutputPayload { content, success },
+                                    is_user_feedback: false,
                                 },
                             );
                         }
                         (ResponseItem::Reasoning { .. }, None) => {
                             // Omit from conversation history.
                         }
-                        (_, Some(ResponseInputItem::UserFeedback { call_id, feedback })) => {
-                            // Record the original user feedback item in the rollout as UserFeedback
+                        (
+                            _,
+                            Some(ResponseInputItem::FunctionCallOutput {
+                                call_id,
+                                output,
+                                is_user_feedback,
+                            }),
+                        ) => {
                             items_to_record_in_conversation_history.push(
-                                ResponseItem::UserFeedback {
+                                ResponseItem::FunctionCallOutput {
                                     call_id: call_id.clone(),
-                                    feedback: feedback.clone(),
+                                    output: output.clone(),
+                                    is_user_feedback: *is_user_feedback,
                                 },
                             );
                         }
@@ -1211,6 +1205,7 @@ async fn try_run_turn(
                     content: "aborted".to_string(),
                     success: Some(false),
                 },
+                is_user_feedback: false,
             })
             .collect::<Vec<_>>()
     };
@@ -1374,6 +1369,7 @@ async fn handle_response_item(
                             content: "LocalShellCall without call_id or id".to_string(),
                             success: None,
                         },
+                        is_user_feedback: false,
                     }));
                 }
             };
@@ -1391,10 +1387,6 @@ async fn handle_response_item(
         }
         ResponseItem::FunctionCallOutput { .. } => {
             debug!("unexpected FunctionCallOutput from stream");
-            None
-        }
-        ResponseItem::UserFeedback { .. } => {
-            debug!("unexpected UserFeedback from stream");
             None
         }
         ResponseItem::Other => None,
@@ -1437,6 +1429,7 @@ async fn handle_function_call(
                             content: format!("unsupported call: {name}"),
                             success: None,
                         },
+                        is_user_feedback: false,
                     }
                 }
             }
@@ -1469,6 +1462,7 @@ fn parse_container_exec_arguments(
                     content: format!("failed to parse function arguments: {e}"),
                     success: None,
                 },
+                is_user_feedback: false,
             };
             Err(Box::new(output))
         }
@@ -1496,6 +1490,7 @@ async fn handle_container_exec_with_params(
                     content: format!("error: {parse_error:#}"),
                     success: None,
                 },
+                is_user_feedback: false,
             };
         }
         MaybeApplyPatchVerified::ShellParseError(error) => {
@@ -1532,11 +1527,17 @@ async fn handle_container_exec_with_params(
                     sess.add_approved_command(params.command.clone());
                 }
                 ReviewDecision::Denied | ReviewDecision::Abort => {
-                    return ResponseInputItem::UserFeedback {
+                    return ResponseInputItem::FunctionCallOutput {
                         call_id: call_id.clone(),
-                        feedback: feedback
-                            .map(|f| format!("exec command rejected by user with feedback: `{f}`"))
-                            .unwrap_or_else(|| "exec command rejected by user".to_string()),
+                        output: FunctionCallOutputPayload {
+                            content: feedback
+                                .map(|f| {
+                                    format!("exec command rejected by user with feedback: `{f}`")
+                                })
+                                .unwrap_or_else(|| "exec command rejected by user".to_string()),
+                            success: None,
+                        },
+                        is_user_feedback: true,
                     };
                 }
             }
@@ -1548,11 +1549,12 @@ async fn handle_container_exec_with_params(
         }
         SafetyCheck::Reject { reason } => {
             return ResponseInputItem::FunctionCallOutput {
-                call_id,
+                call_id: call_id.clone(),
                 output: FunctionCallOutputPayload {
                     content: format!("exec command rejected: {reason}"),
                     success: None,
                 },
+                is_user_feedback: false,
             };
         }
     };
@@ -1594,6 +1596,7 @@ async fn handle_container_exec_with_params(
                     content,
                     success: Some(is_success),
                 },
+                is_user_feedback: false,
             }
         }
         Err(CodexErr::Sandbox(error)) => {
@@ -1607,6 +1610,7 @@ async fn handle_container_exec_with_params(
                     content: format!("execution error: {e}"),
                     success: None,
                 },
+                is_user_feedback: false,
             }
         }
     }
@@ -1630,6 +1634,7 @@ async fn handle_sandbox_error(
                 ),
                 success: Some(false),
             },
+            is_user_feedback: false,
         };
     }
 
@@ -1712,6 +1717,7 @@ async fn handle_sandbox_error(
                             content,
                             success: Some(is_success),
                         },
+                        is_user_feedback: false,
                     }
                 }
                 Err(e) => {
@@ -1722,17 +1728,22 @@ async fn handle_sandbox_error(
                             content: format!("retry failed: {e}"),
                             success: None,
                         },
+                        is_user_feedback: false,
                     }
                 }
             }
         }
         ReviewDecision::Denied | ReviewDecision::Abort => {
             // Fall through to original failure handling.
-            ResponseInputItem::UserFeedback {
+            ResponseInputItem::FunctionCallOutput {
                 call_id: call_id.clone(),
-                feedback: feedback
-                    .map(|f| format!("exec command rejected by user with feedback: `{f}`"))
-                    .unwrap_or_else(|| "exec command rejected by user".to_string()),
+                output: FunctionCallOutputPayload {
+                    content: feedback
+                        .map(|f| format!("exec command rejected by user with feedback: `{f}`"))
+                        .unwrap_or_else(|| "exec command rejected by user".to_string()),
+                    success: None,
+                },
+                is_user_feedback: true,
             }
         }
     }
@@ -1766,11 +1777,15 @@ async fn apply_patch(
             match decision {
                 ReviewDecision::Approved | ReviewDecision::ApprovedForSession => false,
                 ReviewDecision::Denied | ReviewDecision::Abort => {
-                    return ResponseInputItem::UserFeedback {
+                    return ResponseInputItem::FunctionCallOutput {
                         call_id,
-                        feedback: feedback
-                            .map(|f| format!("patch rejected by user with feedback: `{f}`"))
-                            .unwrap_or_else(|| "patch rejected by user".to_string()),
+                        output: FunctionCallOutputPayload {
+                            content: feedback
+                                .map(|f| format!("patch rejected by user with feedback: `{f}`"))
+                                .unwrap_or_else(|| "patch rejected by user".to_string()),
+                            success: None,
+                        },
+                        is_user_feedback: true,
                     };
                 }
             }
@@ -1782,6 +1797,7 @@ async fn apply_patch(
                     content: format!("patch rejected: {reason}"),
                     success: Some(false),
                 },
+                is_user_feedback: false,
             };
         }
     };
@@ -1805,11 +1821,15 @@ async fn apply_patch(
             decision,
             ReviewDecision::Approved | ReviewDecision::ApprovedForSession
         ) {
-            return ResponseInputItem::UserFeedback {
+            return ResponseInputItem::FunctionCallOutput {
                 call_id,
-                feedback: feedback
-                    .map(|f| format!("patch rejected by user with feedback: `{f}`"))
-                    .unwrap_or_else(|| "patch rejected by user".to_string()),
+                output: FunctionCallOutputPayload {
+                    content: feedback
+                        .map(|f| format!("patch rejected by user with feedback: `{f}`"))
+                        .unwrap_or_else(|| "patch rejected by user".to_string()),
+                    success: None,
+                },
+                is_user_feedback: true,
             };
         }
 
@@ -1930,6 +1950,7 @@ async fn apply_patch(
                 content: String::from_utf8_lossy(&stdout).to_string(),
                 success: None,
             },
+            is_user_feedback: false,
         },
         Err(e) => ResponseInputItem::FunctionCallOutput {
             call_id,
@@ -1937,6 +1958,7 @@ async fn apply_patch(
                 content: format!("error: {e:#}, stderr: {}", String::from_utf8_lossy(&stderr)),
                 success: Some(false),
             },
+            is_user_feedback: false,
         },
     }
 }

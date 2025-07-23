@@ -36,6 +36,7 @@ pub(crate) async fn handle_mcp_tool_call(
                         content: format!("err: {e}"),
                         success: Some(false),
                     },
+                    is_user_feedback: false,
                 };
             }
         }

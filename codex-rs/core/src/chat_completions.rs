@@ -90,7 +90,9 @@ pub(crate) async fn stream_chat_completions(
                     }]
                 }));
             }
-            ResponseItem::FunctionCallOutput { call_id, output } => {
+            ResponseItem::FunctionCallOutput {
+                call_id, output, ..
+            } => {
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": call_id,
@@ -100,13 +102,6 @@ pub(crate) async fn stream_chat_completions(
             ResponseItem::Reasoning { .. } | ResponseItem::Other => {
                 // Omit these items from the conversation history.
                 continue;
-            }
-            ResponseItem::UserFeedback { call_id, feedback } => {
-                messages.push(json!({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": feedback,
-                }));
             }
         }
     }
