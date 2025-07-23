@@ -102,6 +102,7 @@ impl From<ResponseInputItem> for ResponseItem {
 
 impl ResponseItem {
     /// Returns true if this item represents user feedback
+    #[allow(dead_code)]
     pub(crate) fn is_user_feedback(&self) -> bool {
         match self {
             Self::FunctionCallOutput { output, .. } => output.is_user_feedback,

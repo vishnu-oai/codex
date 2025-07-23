@@ -90,9 +90,7 @@ pub(crate) async fn stream_chat_completions(
                     }]
                 }));
             }
-            ResponseItem::FunctionCallOutput {
-                call_id, output, ..
-            } => {
+            ResponseItem::FunctionCallOutput { call_id, output } => {
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": call_id,
