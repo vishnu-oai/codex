@@ -117,7 +117,6 @@ impl ModelClient {
         let full_instructions = prompt.get_full_instructions(&self.config.model);
         let tools_json = create_tools_json_for_responses_api(prompt, &self.config.model)?;
         let reasoning = create_reasoning_param_for_request(&self.config, self.effort, self.summary);
-
         let payload = ResponsesApiRequest {
             model: &self.config.model,
             instructions: &full_instructions,

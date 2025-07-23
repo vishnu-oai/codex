@@ -1,1 +1,3 @@
-[{ "type": "response.output_item.done" }]
+[
+  {"type": "response.output_item.done"}
+]
