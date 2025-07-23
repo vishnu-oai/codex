@@ -118,28 +118,19 @@ impl ModelClient {
         let tools_json = create_tools_json_for_responses_api(prompt, &self.config.model)?;
         let reasoning = create_reasoning_param_for_request(&self.config, self.effort, self.summary);
 
-        // Sanitize input to avoid leaking internal flags like `is_user_feedback` to the LLM endpoint.
-        let sanitized_input = sanitize_items_for_llm(&prompt.input);
-
-        let mut base = serde_json::json!({
-            "model": self.config.model,
-            "instructions": full_instructions,
-            "input": sanitized_input,
-            "tools": tools_json,
-            "tool_choice": "auto",
-            "parallel_tool_calls": false,
-            "reasoning": reasoning,
-            "store": prompt.store,
-            "stream": true,
-        });
-
-        if let Some(prev) = &prompt.prev_id {
-            if let Some(obj) = base.as_object_mut() {
-                obj.insert("previous_response_id".to_string(), serde_json::json!(prev));
-            }
-        }
-
-        let payload = base;
+        let payload = ResponsesApiRequest {
+            model: &self.config.model,
+            instructions: &full_instructions,
+            input: &prompt.input,
+            tools: &tools_json,
+            tool_choice: "auto",
+            parallel_tool_calls: false,
+            reasoning,
+            previous_response_id: prompt.prev_id.clone(),
+            store: prompt.store,
+            // TODO: make this configurable
+            stream: true,
+        };
 
         trace!(
             "POST to {}: {}",
@@ -435,27 +426,6 @@ async fn process_sse<S>(
             other => debug!(other, "sse event"),
         }
     }
-}
-
-/// Remove internal-only fields from ResponseItems before sending to the LLM endpoint.
-/// Extend this with new match arms as additional sanitization rules are needed.
-fn sanitize_items_for_llm(items: &[ResponseItem]) -> Vec<serde_json::Value> {
-    items
-        .iter()
-        .map(|item| sanitize_item_for_llm(item))
-        .collect()
-}
-
-fn sanitize_item_for_llm(item: &ResponseItem) -> serde_json::Value {
-    // Start from full JSON then prune based on variant.
-    let mut v = serde_json::to_value(item).unwrap_or(serde_json::Value::Null);
-    if let Some(obj) = v.as_object_mut() {
-        if obj.get("type").and_then(|t| t.as_str()) == Some("function_call_output") {
-            obj.remove("is_user_feedback");
-        }
-        // Add more per-type sanitizers here as needed.
-    }
-    v
 }
 
 /// used in tests to stream from a text SSE file

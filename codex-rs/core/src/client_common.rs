@@ -128,7 +128,8 @@ pub(crate) struct ResponsesApiRequest<'a> {
     // TODO(mbolin): ResponseItem::Other should not be serialized. Currently,
     // we code defensively to avoid this case, but perhaps we should use a
     // separate enum for serialization.
-    pub(crate) input: &'a Vec<ResponseItem>,
+    #[serde(serialize_with = "serialize_sanitized_input")]
+    pub(crate) input: &'a Vec<crate::models::ResponseItem>,
     pub(crate) tools: &'a [serde_json::Value],
     pub(crate) tool_choice: &'static str,
     pub(crate) parallel_tool_calls: bool,
@@ -138,6 +139,30 @@ pub(crate) struct ResponsesApiRequest<'a> {
     /// true when using the Responses API.
     pub(crate) store: bool,
     pub(crate) stream: bool,
+}
+
+// Custom serializer that strips internal-only fields before sending to the LLM.
+fn serialize_sanitized_input<S>(
+    input: &Vec<crate::models::ResponseItem>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::ser::Serializer,
+{
+    let sanitized: Vec<serde_json::Value> = input
+        .iter()
+        .map(|item| {
+            let mut v = serde_json::to_value(item).unwrap_or(serde_json::Value::Null);
+            if let Some(obj) = v.as_object_mut() {
+                if obj.get("type").and_then(|t| t.as_str()) == Some("function_call_output") {
+                    obj.remove("is_user_feedback");
+                }
+            }
+            v
+        })
+        .collect();
+
+    serde::Serialize::serialize(&sanitized, serializer)
 }
 
 use crate::config::Config;
@@ -189,5 +214,77 @@ impl Stream for ResponseStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.rx_event.poll_recv(cx)
+    }
+}
+
+#[cfg(test)]
+mod serialize_tests {
+    use super::*;
+    use crate::models::ContentItem;
+    use crate::models::FunctionCallOutputPayload;
+    use crate::models::ResponseItem;
+    use serde_json::Value;
+
+    fn build_payload<'a>(input: &'a Vec<ResponseItem>) -> ResponsesApiRequest<'a> {
+        // Minimal dummy payload to exercise serialization.
+        let model = "test-model";
+        let instructions = "do it";
+        ResponsesApiRequest {
+            model,
+            instructions,
+            input,
+            tools: &[],
+            tool_choice: "auto",
+            parallel_tool_calls: false,
+            reasoning: None,
+            previous_response_id: None,
+            store: false,
+            stream: false,
+        }
+    }
+
+    #[test]
+    fn strips_is_user_feedback_field() {
+        let items = vec![ResponseItem::FunctionCallOutput {
+            call_id: "abc".into(),
+            output: FunctionCallOutputPayload {
+                content: "result".into(),
+                success: Some(true),
+            },
+            is_user_feedback: true,
+        }];
+
+        let payload = build_payload(&items);
+        let v: Value = match serde_json::to_value(&payload) {
+            Ok(v) => v,
+            Err(e) => panic!("serialize payload failed: {e}"),
+        };
+        let input0 = &v["input"][0];
+        assert_eq!(input0["type"], "function_call_output");
+        assert!(
+            input0.get("is_user_feedback").is_none(),
+            "sanitizer should drop is_user_feedback"
+        );
+        // Ensure output still there
+        assert_eq!(input0["output"], "result");
+    }
+
+    #[test]
+    fn leaves_other_items_untouched() {
+        let items = vec![ResponseItem::Message {
+            role: "assistant".into(),
+            content: vec![ContentItem::OutputText { text: "hi".into() }],
+        }];
+
+        let payload = build_payload(&items);
+        let v: Value = match serde_json::to_value(&payload) {
+            Ok(v) => v,
+            Err(e) => panic!("serialize payload failed: {e}"),
+        };
+        let input0 = &v["input"][0];
+        assert_eq!(input0["type"], "message");
+        assert_eq!(input0["role"], "assistant");
+        // Ensure no unexpected stripping
+        assert!(input0.get("content").is_some());
     }
 }
