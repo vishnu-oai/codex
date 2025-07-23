@@ -968,35 +968,25 @@ async fn run_task(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) {
                         }
                         (
                             ResponseItem::LocalShellCall { .. },
-                            Some(ResponseInputItem::FunctionCallOutput {
-                                call_id,
-                                output,
-                                is_user_feedback,
-                            }),
+                            Some(ResponseInputItem::FunctionCallOutput { call_id, output }),
                         ) => {
                             items_to_record_in_conversation_history.push(item);
                             items_to_record_in_conversation_history.push(
                                 ResponseItem::FunctionCallOutput {
                                     call_id: call_id.clone(),
                                     output: output.clone(),
-                                    is_user_feedback: *is_user_feedback,
                                 },
                             );
                         }
                         (
                             ResponseItem::FunctionCall { .. },
-                            Some(ResponseInputItem::FunctionCallOutput {
-                                call_id,
-                                output,
-                                is_user_feedback,
-                            }),
+                            Some(ResponseInputItem::FunctionCallOutput { call_id, output }),
                         ) => {
                             items_to_record_in_conversation_history.push(item);
                             items_to_record_in_conversation_history.push(
                                 ResponseItem::FunctionCallOutput {
                                     call_id: call_id.clone(),
                                     output: output.clone(),
-                                    is_user_feedback: *is_user_feedback,
                                 },
                             );
                         }
@@ -1022,27 +1012,22 @@ async fn run_task(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) {
                             items_to_record_in_conversation_history.push(
                                 ResponseItem::FunctionCallOutput {
                                     call_id: call_id.clone(),
-                                    output: FunctionCallOutputPayload { content, success },
-                                    is_user_feedback: false,
+                                    output: FunctionCallOutputPayload {
+                                        content,
+                                        success,
+                                        is_user_feedback: false,
+                                    },
                                 },
                             );
                         }
                         (ResponseItem::Reasoning { .. }, None) => {
                             // Omit from conversation history.
                         }
-                        (
-                            _,
-                            Some(ResponseInputItem::FunctionCallOutput {
-                                call_id,
-                                output,
-                                is_user_feedback,
-                            }),
-                        ) => {
+                        (_, Some(ResponseInputItem::FunctionCallOutput { call_id, output })) => {
                             items_to_record_in_conversation_history.push(
                                 ResponseItem::FunctionCallOutput {
                                     call_id: call_id.clone(),
                                     output: output.clone(),
-                                    is_user_feedback: *is_user_feedback,
                                 },
                             );
                         }
@@ -1212,8 +1197,8 @@ async fn try_run_turn(
                 output: FunctionCallOutputPayload {
                     content: "aborted".to_string(),
                     success: Some(false),
+                    is_user_feedback: false,
                 },
-                is_user_feedback: false,
             })
             .collect::<Vec<_>>()
     };
@@ -1376,8 +1361,8 @@ async fn handle_response_item(
                         output: FunctionCallOutputPayload {
                             content: "LocalShellCall without call_id or id".to_string(),
                             success: None,
+                            is_user_feedback: false,
                         },
-                        is_user_feedback: false,
                     }));
                 }
             };
@@ -1436,8 +1421,8 @@ async fn handle_function_call(
                         output: FunctionCallOutputPayload {
                             content: format!("unsupported call: {name}"),
                             success: None,
+                            is_user_feedback: false,
                         },
-                        is_user_feedback: false,
                     }
                 }
             }
@@ -1469,8 +1454,8 @@ fn parse_container_exec_arguments(
                 output: FunctionCallOutputPayload {
                     content: format!("failed to parse function arguments: {e}"),
                     success: None,
+                    is_user_feedback: false,
                 },
-                is_user_feedback: false,
             };
             Err(Box::new(output))
         }
@@ -1497,8 +1482,8 @@ async fn handle_container_exec_with_params(
                 output: FunctionCallOutputPayload {
                     content: format!("error: {parse_error:#}"),
                     success: None,
+                    is_user_feedback: false,
                 },
-                is_user_feedback: false,
             };
         }
         MaybeApplyPatchVerified::ShellParseError(error) => {
@@ -1544,8 +1529,8 @@ async fn handle_container_exec_with_params(
                                 })
                                 .unwrap_or_else(|| "exec command rejected by user".to_string()),
                             success: None,
+                            is_user_feedback: true,
                         },
-                        is_user_feedback: true,
                     };
                 }
             }
@@ -1561,8 +1546,8 @@ async fn handle_container_exec_with_params(
                 output: FunctionCallOutputPayload {
                     content: format!("exec command rejected: {reason}"),
                     success: None,
+                    is_user_feedback: false,
                 },
-                is_user_feedback: false,
             };
         }
     };
@@ -1603,8 +1588,8 @@ async fn handle_container_exec_with_params(
                 output: FunctionCallOutputPayload {
                     content,
                     success: Some(is_success),
+                    is_user_feedback: false,
                 },
-                is_user_feedback: false,
             }
         }
         Err(CodexErr::Sandbox(error)) => {
@@ -1617,8 +1602,8 @@ async fn handle_container_exec_with_params(
                 output: FunctionCallOutputPayload {
                     content: format!("execution error: {e}"),
                     success: None,
+                    is_user_feedback: false,
                 },
-                is_user_feedback: false,
             }
         }
     }
@@ -1641,8 +1626,8 @@ async fn handle_sandbox_error(
                     "failed in sandbox {sandbox_type:?} with execution error: {error}"
                 ),
                 success: Some(false),
+                is_user_feedback: false,
             },
-            is_user_feedback: false,
         };
     }
 
@@ -1724,8 +1709,8 @@ async fn handle_sandbox_error(
                         output: FunctionCallOutputPayload {
                             content,
                             success: Some(is_success),
+                            is_user_feedback: false,
                         },
-                        is_user_feedback: false,
                     }
                 }
                 Err(e) => {
@@ -1735,8 +1720,8 @@ async fn handle_sandbox_error(
                         output: FunctionCallOutputPayload {
                             content: format!("retry failed: {e}"),
                             success: None,
+                            is_user_feedback: false,
                         },
-                        is_user_feedback: false,
                     }
                 }
             }
@@ -1750,8 +1735,8 @@ async fn handle_sandbox_error(
                         .map(|f| format!("exec command rejected by user with feedback: `{f}`"))
                         .unwrap_or_else(|| "exec command rejected by user".to_string()),
                     success: None,
+                    is_user_feedback: true,
                 },
-                is_user_feedback: true,
             }
         }
     }
@@ -1792,8 +1777,8 @@ async fn apply_patch(
                                 .map(|f| format!("patch rejected by user with feedback: `{f}`"))
                                 .unwrap_or_else(|| "patch rejected by user".to_string()),
                             success: None,
+                            is_user_feedback: true,
                         },
-                        is_user_feedback: true,
                     };
                 }
             }
@@ -1804,8 +1789,8 @@ async fn apply_patch(
                 output: FunctionCallOutputPayload {
                     content: format!("patch rejected: {reason}"),
                     success: Some(false),
+                    is_user_feedback: false,
                 },
-                is_user_feedback: false,
             };
         }
     };
@@ -1836,8 +1821,8 @@ async fn apply_patch(
                         .map(|f| format!("patch rejected by user with feedback: `{f}`"))
                         .unwrap_or_else(|| "patch rejected by user".to_string()),
                     success: None,
+                    is_user_feedback: true,
                 },
-                is_user_feedback: true,
             };
         }
 
@@ -1957,16 +1942,16 @@ async fn apply_patch(
             output: FunctionCallOutputPayload {
                 content: String::from_utf8_lossy(&stdout).to_string(),
                 success: None,
+                is_user_feedback: false,
             },
-            is_user_feedback: false,
         },
         Err(e) => ResponseInputItem::FunctionCallOutput {
             call_id,
             output: FunctionCallOutputPayload {
                 content: format!("error: {e:#}, stderr: {}", String::from_utf8_lossy(&stderr)),
                 success: Some(false),
+                is_user_feedback: false,
             },
-            is_user_feedback: false,
         },
     }
 }

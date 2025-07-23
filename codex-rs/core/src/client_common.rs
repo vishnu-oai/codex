@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::config_types::ReasoningEffort as ReasoningEffortConfig;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use crate::error::Result;
@@ -6,6 +7,7 @@ use crate::protocol::TokenUsage;
 use codex_apply_patch::APPLY_PATCH_TOOL_INSTRUCTIONS;
 use futures::Stream;
 use serde::Serialize;
+use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -150,26 +152,33 @@ fn serialize_sanitized_input<S>(
 where
     S: serde::ser::Serializer,
 {
-    let sanitized: Vec<serde_json::Value> = input
-        .iter()
-        .map(|item| {
-            // Touch the helper to avoid dead_code lint on is_user_feedback.
-            let _ = item.is_user_feedback();
-
-            let mut v = serde_json::to_value(item).unwrap_or(serde_json::Value::Null);
-            if let Some(obj) = v.as_object_mut() {
-                if obj.get("type").and_then(|t| t.as_str()) == Some("function_call_output") {
-                    obj.remove("is_user_feedback");
-                }
-            }
-            v
-        })
-        .collect();
+    let sanitized: Vec<Value> = input.iter().map(sanitize_response_item).collect();
 
     serde::Serialize::serialize(&sanitized, serializer)
 }
 
-use crate::config::Config;
+// Top-level dispatcher to apply a sanitizer per ResponseItem variant.
+fn sanitize_response_item(item: &crate::models::ResponseItem) -> Value {
+    use crate::models::ResponseItem as RI;
+    match item {
+        RI::FunctionCallOutput { .. } => sanitize_function_call_output(item),
+        // For other variants, no special handling for now.
+        _ => serde_json::to_value(item).unwrap_or(Value::Null),
+    }
+}
+
+// Special-case sanitizer for FunctionCallOutput: replace the `output` object with its `content` string.
+fn sanitize_function_call_output(item: &crate::models::ResponseItem) -> Value {
+    let mut v = serde_json::to_value(item).unwrap_or(Value::Null);
+    if let Some(obj) = v.as_object_mut() {
+        if let Some(output) = obj.get_mut("output") {
+            if let Some(content) = output.get("content") {
+                *output = content.clone();
+            }
+        }
+    }
+    v
+}
 
 pub(crate) fn create_reasoning_param_for_request(
     config: &Config,
@@ -222,20 +231,17 @@ impl Stream for ResponseStream {
 }
 
 #[cfg(test)]
-mod serialize_tests {
+mod sanitize_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::models::ContentItem;
     use crate::models::FunctionCallOutputPayload;
     use crate::models::ResponseItem;
-    use serde_json::Value;
 
-    fn build_payload<'a>(input: &'a Vec<ResponseItem>) -> ResponsesApiRequest<'a> {
-        // Minimal dummy payload to exercise serialization.
-        let model = "test-model";
-        let instructions = "do it";
-        ResponsesApiRequest {
-            model,
-            instructions,
+    fn make_req(input: &Vec<ResponseItem>) -> serde_json::Value {
+        let req = ResponsesApiRequest {
+            model: "test-model",
+            instructions: "instr",
             input,
             tools: &[],
             tool_choice: "auto",
@@ -244,51 +250,41 @@ mod serialize_tests {
             previous_response_id: None,
             store: false,
             stream: false,
-        }
+        };
+        serde_json::to_value(&req).unwrap()
     }
 
     #[test]
-    fn strips_is_user_feedback_field() {
+    fn function_call_output_output_is_replaced_by_content() {
         let items = vec![ResponseItem::FunctionCallOutput {
-            call_id: "abc".into(),
+            call_id: "c1".into(),
             output: FunctionCallOutputPayload {
-                content: "result".into(),
+                content: "hello".into(),
                 success: Some(true),
+                is_user_feedback: true,
             },
-            is_user_feedback: true,
         }];
 
-        let payload = build_payload(&items);
-        let v: Value = match serde_json::to_value(&payload) {
-            Ok(v) => v,
-            Err(e) => panic!("serialize payload failed: {e}"),
-        };
+        let v = make_req(&items);
         let input0 = &v["input"][0];
-        assert_eq!(input0["type"], "function_call_output");
-        assert!(
-            input0.get("is_user_feedback").is_none(),
-            "sanitizer should drop is_user_feedback"
-        );
-        // Ensure output still there
-        assert_eq!(input0["output"], "result");
+        assert_eq!(input0["type"].as_str().unwrap(), "function_call_output");
+        assert!(input0["output"].is_string());
+        assert_eq!(input0["output"].as_str().unwrap(), "hello");
+        // The object fields like is_user_feedback should be stripped at this stage
+        // (because output is now just a string).
     }
 
     #[test]
-    fn leaves_other_items_untouched() {
+    fn non_function_call_items_are_unchanged() {
         let items = vec![ResponseItem::Message {
-            role: "assistant".into(),
-            content: vec![ContentItem::OutputText { text: "hi".into() }],
+            role: "user".into(),
+            content: vec![ContentItem::InputText { text: "Hi".into() }],
         }];
 
-        let payload = build_payload(&items);
-        let v: Value = match serde_json::to_value(&payload) {
-            Ok(v) => v,
-            Err(e) => panic!("serialize payload failed: {e}"),
-        };
+        let v = make_req(&items);
         let input0 = &v["input"][0];
-        assert_eq!(input0["type"], "message");
-        assert_eq!(input0["role"], "assistant");
-        // Ensure no unexpected stripping
-        assert!(input0.get("content").is_some());
+        assert_eq!(input0["type"].as_str().unwrap(), "message");
+        assert_eq!(input0["role"].as_str().unwrap(), "user");
+        assert_eq!(input0["content"][0]["text"].as_str().unwrap(), "Hi");
     }
 }
