@@ -225,7 +225,7 @@ pub struct Approval {
 struct State {
     approved_commands: HashSet<Vec<String>>,
     current_task: Option<AgentTask>,
-    pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
+    pending_approvals: HashMap<String, oneshot::Sender<Approval>>,
     pending_input: Vec<ResponseInputItem>,
     history: ConversationHistory,
 }

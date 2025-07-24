@@ -202,7 +202,6 @@ pub struct FunctionCallOutputPayload {
     pub content: String,
     #[allow(dead_code)]
     pub success: Option<bool>,
-    #[serde(default)]
     pub is_user_feedback: bool,
 }
 
@@ -232,10 +231,15 @@ impl<'de> Deserialize<'de> for FunctionCallOutputPayload {
     where
         D: Deserializer<'de>,
     {
+        // The Responses API (and our sanitize step) send this payload as a bare string.
+        // That form carries no `success` or `is_user_feedback` flags, so we must supply
+        // defaults here. We pick `None` for success and `false` for is_user_feedback as
+        // conservative fallbacks; the full object form is preserved in rollout JSONL.
         let s = String::deserialize(deserializer)?;
         Ok(FunctionCallOutputPayload {
             content: s,
             success: None,
+            is_user_feedback: false,
         })
     }
 }
@@ -328,13 +332,14 @@ mod tests {
 
     #[test]
     fn deserialize_user_feedback() {
-        let json = r#"{"type": "function_call_output", "call_id": "call_123", "output": {"content": "This is a test feedback", "success": null, "is_user_feedback": true}}"#;
+        // The wire format we deserialize from the LLM side is a bare string for `output`.
+        let json = r#"{"type":"function_call_output","call_id":"call_123","output":"This is a test feedback"}"#;
         let feedback: ResponseItem = serde_json::from_str(json).unwrap();
         if let ResponseItem::FunctionCallOutput { call_id, output } = feedback {
             assert_eq!(call_id, "call_123");
             assert_eq!(output.content, "This is a test feedback");
             assert_eq!(output.success, None);
-            assert!(output.is_user_feedback);
+            assert!(!output.is_user_feedback);
         } else {
             panic!("Expected FunctionCallOutput variant");
         }
@@ -386,6 +391,7 @@ mod tests {
     #[test]
     fn non_user_feedback_to_llm_compatible_unchanged() {
         let message = ResponseItem::Message {
+            id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
                 text: "Hello".to_string(),
@@ -395,7 +401,7 @@ mod tests {
         // Test that regular messages are not identified as user feedback
         assert!(!message.is_user_feedback());
 
-        if let ResponseItem::Message { role, content } = message {
+        if let ResponseItem::Message { role, content, .. } = message {
             assert_eq!(role, "user");
             assert_eq!(content.len(), 1);
         } else {

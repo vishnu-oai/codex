@@ -244,9 +244,9 @@ mod sanitize_tests {
             tool_choice: "auto",
             parallel_tool_calls: false,
             reasoning: None,
-            previous_response_id: None,
             store: false,
             stream: false,
+            include: vec![],
         };
         serde_json::to_value(&req).unwrap()
     }
@@ -274,6 +274,7 @@ mod sanitize_tests {
     #[test]
     fn non_function_call_items_are_unchanged() {
         let items = vec![ResponseItem::Message {
+            id: None,
             role: "user".into(),
             content: vec![ContentItem::InputText { text: "Hi".into() }],
         }];
