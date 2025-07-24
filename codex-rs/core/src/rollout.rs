@@ -116,7 +116,6 @@ impl RolloutRecorder {
                 instructions,
             }),
             cwd,
-            config.experimental_disable_git_metadata,
         ));
 
         Ok(Self { tx })
@@ -222,7 +221,6 @@ impl RolloutRecorder {
             rx,
             None,
             cwd,
-            false,
         ));
         info!("Resumed rollout successfully from {path:?}");
         Ok((Self { tx }, saved))
@@ -294,15 +292,10 @@ async fn rollout_writer(
     mut rx: mpsc::Receiver<RolloutCmd>,
     mut meta: Option<SessionMeta>,
     cwd: std::path::PathBuf,
-    disable_git_metadata: bool,
 ) {
     // If we have a meta, collect git info asynchronously and write meta first
     if let Some(session_meta) = meta.take() {
-        let git_info = if disable_git_metadata {
-            None
-        } else {
-            collect_git_info(&cwd).await
-        };
+        let git_info = collect_git_info(&cwd).await;
         let session_meta_with_git = SessionMetaWithGit {
             meta: session_meta,
             git: git_info,
@@ -358,10 +351,4 @@ async fn rollout_writer(
             }
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::expect_used)]
-    #![allow(clippy::unwrap_used)]
 }

@@ -143,9 +143,6 @@ pub struct Config {
 
     /// Experimental rollout resume path (absolute path to .jsonl; undocumented).
     pub experimental_resume: Option<PathBuf>,
-
-    /// Experimental flag to disable git metadata collection.
-    pub experimental_disable_git_metadata: bool,
 }
 
 impl Config {
@@ -336,9 +333,6 @@ pub struct ConfigToml {
 
     /// Experimental path to a file whose contents replace the built-in BASE_INSTRUCTIONS.
     pub experimental_instructions_file: Option<PathBuf>,
-
-    /// Experimental flag to disable git metadata collection.
-    pub experimental_disable_git_metadata: Option<bool>,
 }
 
 impl ConfigToml {
@@ -524,9 +518,6 @@ impl Config {
                 .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
 
             experimental_resume,
-            experimental_disable_git_metadata: cfg
-                .experimental_disable_git_metadata
-                .unwrap_or(false),
         };
         Ok(config)
     }
@@ -850,7 +841,6 @@ disable_response_storage = true
                 chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
                 experimental_resume: None,
                 base_instructions: None,
-                experimental_disable_git_metadata: false,
             },
             o3_profile_config
         );
@@ -899,7 +889,6 @@ disable_response_storage = true
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             experimental_resume: None,
             base_instructions: None,
-            experimental_disable_git_metadata: false,
         };
 
         assert_eq!(expected_gpt3_profile_config, gpt3_profile_config);
@@ -963,7 +952,6 @@ disable_response_storage = true
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             experimental_resume: None,
             base_instructions: None,
-            experimental_disable_git_metadata: false,
         };
 
         assert_eq!(expected_zdr_profile_config, zdr_profile_config);

@@ -62,8 +62,6 @@ async fn chat_mode_stream_cli() {
         .arg(&provider_override)
         .arg("-c")
         .arg("model_provider=\"mock\"")
-        .arg("-c")
-        .arg("experimental_disable_git_metadata=true")
         .arg("-C")
         .arg(env!("CARGO_MANIFEST_DIR"))
         .arg("hello?");
@@ -110,8 +108,6 @@ async fn responses_api_stream_cli() {
         .arg("--")
         .arg("exec")
         .arg("--skip-git-repo-check")
-        .arg("-c")
-        .arg("experimental_disable_git_metadata=true")
         .arg("-C")
         .arg(env!("CARGO_MANIFEST_DIR"))
         .arg("hello?");
@@ -127,7 +123,7 @@ async fn responses_api_stream_cli() {
 }
 
 /// End-to-end: create a session (writes rollout), verify the file, then resume and confirm append.
-#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn integration_creates_and_checks_session_file() {
     // Honor sandbox network restrictions for CI parity with the other tests.
     if std::env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
@@ -158,8 +154,6 @@ async fn integration_creates_and_checks_session_file() {
         .arg("--")
         .arg("exec")
         .arg("--skip-git-repo-check")
-        .arg("-c")
-        .arg("experimental_disable_git_metadata=true")
         .arg("-C")
         .arg(env!("CARGO_MANIFEST_DIR"))
         .arg(&prompt);
@@ -328,8 +322,6 @@ async fn integration_creates_and_checks_session_file() {
         .arg("--skip-git-repo-check")
         .arg("-c")
         .arg(&resume_override)
-        .arg("-c")
-        .arg("experimental_disable_git_metadata=true")
         .arg("-C")
         .arg(env!("CARGO_MANIFEST_DIR"))
         .arg(&prompt2);
