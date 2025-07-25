@@ -4,13 +4,15 @@
 //! between user and agent.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
-use std::str::FromStr;
+use std::str::FromStr; // Added for FinalOutput Display implementation
 
 use mcp_types::CallToolResult;
 use serde::Deserialize;
 use serde::Serialize;
+use strum_macros::Display;
 use uuid::Uuid;
 
 use crate::config_types::ReasoningEffort as ReasoningEffortConfig;
@@ -129,14 +131,16 @@ pub enum Op {
 
 /// Determines the conditions under which the user is consulted to approve
 /// running the command proposed by Codex.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Display)]
 #[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
 pub enum AskForApproval {
     /// Under this policy, only "known safe" commands—as determined by
     /// `is_safe_command()`—that **only read files** are auto‑approved.
     /// Everything else will ask the user to approve.
     #[default]
     #[serde(rename = "untrusted")]
+    #[strum(serialize = "untrusted")]
     UnlessTrusted,
 
     /// *All* commands are auto‑approved, but they are expected to run inside a
@@ -359,6 +363,36 @@ pub struct TokenUsage {
     pub output_tokens: u64,
     pub reasoning_output_tokens: Option<u64>,
     pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FinalOutput {
+    pub token_usage: TokenUsage,
+}
+
+impl From<TokenUsage> for FinalOutput {
+    fn from(token_usage: TokenUsage) -> Self {
+        Self { token_usage }
+    }
+}
+
+impl fmt::Display for FinalOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let u = &self.token_usage;
+        write!(
+            f,
+            "Token usage: total={} input={}{} output={}{}",
+            u.total_tokens,
+            u.input_tokens,
+            u.cached_input_tokens
+                .map(|c| format!(" (cached {c})"))
+                .unwrap_or_default(),
+            u.output_tokens,
+            u.reasoning_output_tokens
+                .map(|r| format!(" (reasoning {r})"))
+                .unwrap_or_default()
+        )
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
