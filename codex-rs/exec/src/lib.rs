@@ -6,15 +6,13 @@ mod event_processor_with_json_output;
 use std::io::IsTerminal;
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 pub use cli::Cli;
 use codex_core::BUILT_IN_OSS_MODEL_PROVIDER_ID;
-use codex_core::codex_wrapper::CodexConversation;
-use codex_core::codex_wrapper::{self};
+use codex_core::ConversationManager;
+use codex_core::NewConversation;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
-use codex_core::config_types::SandboxMode;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
@@ -22,50 +20,18 @@ use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
 use codex_core::protocol::TaskCompleteEvent;
 use codex_core::util::is_inside_git_repo;
+use codex_login::AuthManager;
 use codex_ollama::DEFAULT_OSS_MODEL;
+use codex_protocol::config_types::SandboxMode;
 use event_processor_with_human_output::EventProcessorWithHumanOutput;
 use event_processor_with_json_output::EventProcessorWithJsonOutput;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
-use tracing_subscriber::prelude::*;
 
 use crate::event_processor::CodexStatus;
 use crate::event_processor::EventProcessor;
-
-#[derive(serde::Deserialize)]
-struct TaskConfigYaml {
-    tasks: Option<Vec<TaskYaml>>, // be tolerant
-}
-
-#[derive(serde::Deserialize)]
-struct TaskYaml {
-    name: String,
-    #[serde(default)]
-    prompt: Vec<String>,
-    #[serde(default)]
-    prompt_file: Option<String>,
-}
-
-fn load_task_prompt(cwd: &std::path::Path, name: &str) -> anyhow::Result<Option<String>> {
-    let path = cwd.join(".codex").join("tasks.yaml");
-    if !path.exists() {
-        return Ok(None);
-    }
-    let text = std::fs::read_to_string(&path)?;
-    let cfg: TaskConfigYaml = serde_yaml::from_str(&text)?;
-    let tasks = cfg.tasks.unwrap_or_default();
-    if let Some(t) = tasks.into_iter().find(|t| t.name == name) {
-        if let Some(file) = t.prompt_file {
-            let p = cwd.join(".codex").join(file);
-            let s = std::fs::read_to_string(p)?;
-            return Ok(Some(s));
-        }
-        return Ok(Some(t.prompt.join("\n")));
-    }
-    Ok(None)
-}
 
 pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()> {
     let Cli {
@@ -82,29 +48,16 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         json: json_mode,
         sandbox_mode: sandbox_mode_cli_arg,
         prompt,
-        task,
         config_overrides,
     } = cli;
 
     // Determine the prompt based on CLI arg and/or stdin.
-    let prompt = match (prompt, task.as_deref()) {
-        (Some(p), _) if p != "-" => p,
-        (maybe_dash, Some(_task_name)) => {
-            // For --task, allow empty user text; only read stdin if forced with '-'.
-            let force_stdin = matches!(maybe_dash.as_deref(), Some("-"));
-            if force_stdin {
-                let mut buffer = String::new();
-                if let Err(e) = std::io::stdin().read_to_string(&mut buffer) {
-                    eprintln!("Failed to read prompt from stdin: {e}");
-                    std::process::exit(1);
-                }
-                buffer
-            } else {
-                String::new()
-            }
-        }
-        (maybe_dash, None) => {
-            // Either `-` was passed or no positional arg.
+    let prompt = match prompt {
+        Some(p) if p != "-" => p,
+        // Either `-` was passed or no positional arg.
+        maybe_dash => {
+            // When no arg (None) **and** stdin is a TTY, bail out early – unless the
+            // user explicitly forced reading via `-`.
             let force_stdin = matches!(maybe_dash.as_deref(), Some("-"));
 
             if std::io::stdin().is_terminal() && !force_stdin {
@@ -114,6 +67,10 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
                 std::process::exit(1);
             }
 
+            // Ensure the user knows we are waiting on stdin, as they may
+            // have gotten into this state by mistake. If so, and they are not
+            // writing to stdin, Codex will hang indefinitely, so this should
+            // help them debug in that case.
             if !force_stdin {
                 eprintln!("Reading prompt from stdin...");
             }
@@ -138,11 +95,19 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         ),
     };
 
-    // Build fmt layer (existing logging) to compose with OTEL layer.
+    // TODO(mbolin): Take a more thoughtful approach to logging.
     let default_level = "error";
-    let fmt_layer = tracing_subscriber::fmt::layer()
+    let _ = tracing_subscriber::fmt()
+        // Fallback to the `default_level` log filter if the environment
+        // variable is not set _or_ contains an invalid value
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .or_else(|_| EnvFilter::try_new(default_level))
+                .unwrap_or_else(|_| EnvFilter::new(default_level)),
+        )
         .with_ansi(stderr_with_ansi)
-        .with_writer(std::io::stderr);
+        .with_writer(std::io::stderr)
+        .try_init();
 
     let sandbox_mode = if full_auto {
         Some(SandboxMode::WorkspaceWrite)
@@ -182,8 +147,11 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         codex_linux_sandbox_exe,
         base_instructions: None,
         include_plan_tool: None,
+        include_apply_patch_tool: None,
+        include_view_image_tool: None,
         disable_response_storage: oss.then_some(true),
         show_raw_agent_reasoning: oss.then_some(true),
+        tools_web_search_request: None,
     };
     // Parse `-c` overrides.
     let cli_kv_overrides = match config_overrides.parse_overrides() {
@@ -195,34 +163,6 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     };
 
     let config = Config::load_with_cli_overrides(cli_kv_overrides, overrides)?;
-
-    // Build OTEL layer and compose into subscriber.
-    let telemetry = codex_core::telemetry_init::build_otel_layer_from_config(
-        &config,
-        "codex",
-        env!("CARGO_PKG_VERSION"),
-    );
-    let _telemetry_guard = if let Some((guard, tracer)) = telemetry {
-        let otel_layer = tracing_opentelemetry::OpenTelemetryLayer::new(tracer);
-        // Build env_filter separately and attach via with_filter.
-        let env_filter = EnvFilter::try_from_default_env()
-            .or_else(|_| EnvFilter::try_new(default_level))
-            .unwrap_or_else(|_| EnvFilter::new(default_level));
-        let _ = tracing_subscriber::registry()
-            .with(fmt_layer.with_filter(env_filter))
-            .with(otel_layer)
-            .try_init();
-        Some(guard)
-    } else {
-        let env_filter = EnvFilter::try_from_default_env()
-            .or_else(|_| EnvFilter::try_new(default_level))
-            .unwrap_or_else(|_| EnvFilter::new(default_level));
-        let _ = tracing_subscriber::registry()
-            .with(fmt_layer.with_filter(env_filter))
-            .try_init();
-        None
-    };
-
     let mut event_processor: Box<dyn EventProcessor> = if json_mode {
         Box::new(EventProcessorWithJsonOutput::new(last_message_file.clone()))
     } else {
@@ -248,35 +188,33 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         std::process::exit(1);
     }
 
-    let CodexConversation {
-        codex: codex_wrapper,
+    let conversation_manager = ConversationManager::new(AuthManager::shared(
+        config.codex_home.clone(),
+        config.preferred_auth_method,
+    ));
+    let NewConversation {
+        conversation_id: _,
+        conversation,
         session_configured,
-        ctrl_c,
-        ..
-    } = codex_wrapper::init_codex(config).await?;
-    let codex = Arc::new(codex_wrapper);
+    } = conversation_manager.new_conversation(config).await?;
     info!("Codex initialized with event: {session_configured:?}");
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
     {
-        let codex = codex.clone();
+        let conversation = conversation.clone();
         tokio::spawn(async move {
             loop {
-                let interrupted = ctrl_c.notified();
                 tokio::select! {
-                    _ = interrupted => {
-                        // Forward an interrupt to the codex so it can abort any in‑flight task.
-                        let _ = codex
-                            .submit(
-                                Op::Interrupt,
-                            )
-                            .await;
+                    _ = tokio::signal::ctrl_c() => {
+                        tracing::debug!("Keyboard interrupt");
+                        // Immediately notify Codex to abort any in‑flight task.
+                        conversation.submit(Op::Interrupt).await.ok();
 
-                        // Exit the inner loop and return to the main input prompt.  The codex
+                        // Exit the inner loop and return to the main input prompt. The codex
                         // will emit a `TurnInterrupted` (Error) event which is drained later.
                         break;
                     }
-                    res = codex.next_event() => match res {
+                    res = conversation.next_event() => match res {
                         Ok(event) => {
                             debug!("Received event: {event:?}");
 
@@ -306,9 +244,9 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
             .into_iter()
             .map(|path| InputItem::LocalImage { path })
             .collect();
-        let initial_images_event_id = codex.submit(Op::UserInput { items }).await?;
+        let initial_images_event_id = conversation.submit(Op::UserInput { items }).await?;
         info!("Sent images with event ID: {initial_images_event_id}");
-        while let Ok(event) = codex.next_event().await {
+        while let Ok(event) = conversation.next_event().await {
             if event.id == initial_images_event_id
                 && matches!(
                     event.msg,
@@ -322,64 +260,10 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         }
     }
 
-    // Build input items: if --task, prepend user_instructions with task prompt, then the user text.
-    let mut items: Vec<InputItem> = Vec::new();
-    if let Some(task_name) = task.as_deref() {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        match load_task_prompt(&cwd, task_name) {
-            Ok(Some(task_prompt)) => {
-                let wrapped =
-                    format!("<user_instructions>\n\n{task_prompt}\n\n</user_instructions>");
-                items.push(InputItem::Text { text: wrapped });
-            }
-            Ok(None) => {
-                eprintln!("Task '{task_name}' not found in .codex/tasks.yaml");
-                std::process::exit(1);
-            }
-            Err(e) => {
-                eprintln!("Failed to load task '{task_name}': {e}");
-                std::process::exit(1);
-            }
-        }
-    }
-    if !prompt.is_empty() {
-        items.push(InputItem::Text {
-            text: prompt.clone(),
-        });
-    }
-    // If nothing to send (no task, no prompt), exit.
-    if items.is_empty() {
-        eprintln!("No input provided. Specify PROMPT or use --task <name>.");
-        std::process::exit(1);
-    }
-
-    // Send the input items as a single turn.
-    let initial_prompt_task_id = codex.submit(Op::UserInput { items }).await?;
+    // Send the prompt.
+    let items: Vec<InputItem> = vec![InputItem::Text { text: prompt }];
+    let initial_prompt_task_id = conversation.submit(Op::UserInput { items }).await?;
     info!("Sent prompt with event ID: {initial_prompt_task_id}");
-
-    // If stdin is an interactive TTY, watch for EOF (Ctrl+D) and request a graceful shutdown.
-    if std::io::stdin().is_terminal() {
-        let codex_for_eof = codex.clone();
-        tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-            use tokio::io::stdin;
-            let mut stdin = stdin();
-            let mut buf = [0u8; 1];
-            loop {
-                match stdin.read(&mut buf).await {
-                    Ok(0) => {
-                        let _ = codex_for_eof.submit(Op::Shutdown).await;
-                        break;
-                    }
-                    Ok(_) => {
-                        // discard any input; exec does not read interactive input
-                        continue;
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-    }
 
     // Run the loop until the task is complete.
     while let Some(event) = rx.recv().await {
@@ -387,7 +271,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         match shutdown {
             CodexStatus::Running => continue,
             CodexStatus::InitiateShutdown => {
-                codex.submit(Op::Shutdown).await?;
+                conversation.submit(Op::Shutdown).await?;
             }
             CodexStatus::Shutdown => {
                 break;
