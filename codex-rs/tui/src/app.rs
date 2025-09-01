@@ -3,11 +3,13 @@ use crate::app_event_sender::AppEventSender;
 use crate::chatwidget::ChatWidget;
 use crate::file_search::FileSearchManager;
 use crate::get_git_diff::get_git_diff;
+use crate::history_cell::HistoryCell;
 use crate::onboarding::onboarding_screen::KeyboardHandler;
 use crate::onboarding::onboarding_screen::OnboardingScreen;
 use crate::onboarding::onboarding_screen::OnboardingScreenArgs;
 use crate::should_show_login_screen;
 use crate::slash_command::SlashCommand;
+use crate::tasks;
 use crate::tui;
 use codex_core::config::Config;
 use codex_core::protocol::Event;
@@ -21,6 +23,7 @@ use crossterm::event::KeyEventKind;
 use crossterm::terminal::supports_keyboard_enhancement;
 use ratatui::layout::Offset;
 use ratatui::prelude::Backend;
+use ratatui::style::Stylize;
 use ratatui::text::Line;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -223,10 +226,10 @@ impl App<'_> {
                 }
                 AppEvent::KeyEvent(key_event) => {
                     match key_event {
-                        KeyEvent {
+                        crossterm::event::KeyEvent {
                             code: KeyCode::Char('c'),
                             modifiers: crossterm::event::KeyModifiers::CONTROL,
-                            kind: KeyEventKind::Press,
+                            kind: crossterm::event::KeyEventKind::Press,
                             ..
                         } => match &mut self.app_state {
                             AppState::Chat { widget } => {
@@ -236,9 +239,9 @@ impl App<'_> {
                                 self.app_event_tx.send(AppEvent::ExitRequest);
                             }
                         },
-                        KeyEvent {
+                        crossterm::event::KeyEvent {
                             code: KeyCode::Esc,
-                            kind: KeyEventKind::Press,
+                            kind: crossterm::event::KeyEventKind::Press,
                             ..
                         } => match &mut self.app_state {
                             AppState::Chat { widget } => {
@@ -250,20 +253,20 @@ impl App<'_> {
                                 self.dispatch_key_event(key_event);
                             }
                         },
-                        KeyEvent {
+                        crossterm::event::KeyEvent {
                             code: KeyCode::Char('z'),
                             modifiers: crossterm::event::KeyModifiers::CONTROL,
-                            kind: KeyEventKind::Press,
+                            kind: crossterm::event::KeyEventKind::Press,
                             ..
                         } => {
                             if let AppState::Chat { widget } = &mut self.app_state {
                                 widget.on_ctrl_z();
                             }
                         }
-                        KeyEvent {
+                        crossterm::event::KeyEvent {
                             code: KeyCode::Char('d'),
                             modifiers: crossterm::event::KeyModifiers::CONTROL,
-                            kind: KeyEventKind::Press,
+                            kind: crossterm::event::KeyEventKind::Press,
                             ..
                         } => {
                             match &mut self.app_state {
@@ -283,8 +286,10 @@ impl App<'_> {
                                 }
                             }
                         }
-                        KeyEvent {
-                            kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                        crossterm::event::KeyEvent {
+                            kind:
+                                crossterm::event::KeyEventKind::Press
+                                | crossterm::event::KeyEventKind::Repeat,
                             ..
                         } => {
                             self.dispatch_key_event(key_event);
@@ -311,7 +316,7 @@ impl App<'_> {
                     AppState::Chat { widget } => widget.update_latest_log(line),
                     AppState::Onboarding { .. } => {}
                 },
-                AppEvent::DispatchCommand(command) => match command {
+                AppEvent::DispatchCommand { cmd: command, args } => match command {
                     SlashCommand::New => {
                         // User accepted – switch to chat view.
                         let new_widget = Box::new(ChatWidget::new(
@@ -330,6 +335,115 @@ impl App<'_> {
                             const INIT_PROMPT: &str = include_str!("../prompt_for_init_command.md");
                             widget.submit_text_message(INIT_PROMPT.to_string());
                         }
+                    }
+                    SlashCommand::InitTasks => {
+                        let cwd = self.config.cwd.clone();
+                        match tasks::init_tasks_file(&cwd) {
+                            Ok(path) => {
+                                let lines = vec![
+                                    ratatui::text::Line::from("/init-tasks".magenta()),
+                                    ratatui::text::Line::from(format!(
+                                        "initialized tasks at {}",
+                                        path.display()
+                                    )),
+                                    ratatui::text::Line::from(""),
+                                ];
+                                self.app_event_tx.send(AppEvent::InsertHistory(lines));
+                            }
+                            Err(e) => {
+                                let lines = vec![
+                                    ratatui::text::Line::from("/init-tasks".magenta()),
+                                    ratatui::text::Line::from(format!("error: {e}")),
+                                    ratatui::text::Line::from(""),
+                                ];
+                                self.app_event_tx.send(AppEvent::InsertHistory(lines));
+                            }
+                        }
+                    }
+                    SlashCommand::AddTask => {
+                        // Expect: /add-task <name> "prompt..."
+                        let args = args.trim().to_string();
+                        let (name, prompt) = if args.is_empty() {
+                            (None, None)
+                        } else {
+                            let mut parts = args.splitn(2, ' ');
+                            let n = parts.next().map(|s| s.to_string());
+                            let remainder = parts.next().unwrap_or("").trim().to_string();
+                            let p = if remainder.starts_with('"')
+                                && remainder.ends_with('"')
+                                && remainder.len() >= 2
+                            {
+                                Some(remainder[1..remainder.len() - 1].to_string())
+                            } else {
+                                Some(remainder)
+                            };
+                            (n, p)
+                        };
+                        match (name, prompt) {
+                            (Some(n), Some(p)) if !n.is_empty() && !p.is_empty() => {
+                                match tasks::add_or_update_task(&self.config.cwd, &n, p) {
+                                    Ok(()) => {
+                                        let lines = vec![
+                                            ratatui::text::Line::from("/add-task".magenta()),
+                                            ratatui::text::Line::from(format!("added task '{n}'")),
+                                            ratatui::text::Line::from(""),
+                                        ];
+                                        self.app_event_tx.send(AppEvent::InsertHistory(lines));
+                                    }
+                                    Err(e) => {
+                                        let lines = vec![
+                                            ratatui::text::Line::from("/add-task".magenta()),
+                                            ratatui::text::Line::from(format!("error: {e}")),
+                                            ratatui::text::Line::from(""),
+                                        ];
+                                        self.app_event_tx.send(AppEvent::InsertHistory(lines));
+                                    }
+                                }
+                            }
+                            _ => {
+                                let lines = vec![
+                                    ratatui::text::Line::from("/add-task".magenta()),
+                                    ratatui::text::Line::from(
+                                        "usage: /add-task <name> \"prompt...\"",
+                                    ),
+                                    ratatui::text::Line::from(""),
+                                ];
+                                self.app_event_tx.send(AppEvent::InsertHistory(lines));
+                            }
+                        }
+                    }
+                    SlashCommand::ListTask => match tasks::list_task_names(&self.config.cwd) {
+                        Ok(names) => {
+                            let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
+                            lines.push(ratatui::text::Line::from("/list-task".magenta()));
+                            if names.is_empty() {
+                                lines.push(ratatui::text::Line::from("(no tasks configured)"));
+                            } else {
+                                for n in names {
+                                    lines.push(ratatui::text::Line::from(format!(" - {n}")));
+                                }
+                            }
+                            lines.push(ratatui::text::Line::from(""));
+                            self.app_event_tx.send(AppEvent::InsertHistory(lines));
+                        }
+                        Err(e) => {
+                            let lines = vec![
+                                ratatui::text::Line::from("/list-task".magenta()),
+                                ratatui::text::Line::from(format!("error: {e}")),
+                                ratatui::text::Line::from(""),
+                            ];
+                            self.app_event_tx.send(AppEvent::InsertHistory(lines));
+                        }
+                    },
+                    SlashCommand::AddTaskFile => {
+                        let lines = vec![
+                            ratatui::text::Line::from("/add-task-file".magenta()),
+                            ratatui::text::Line::from(
+                                "use codex-exec: codex-exec --task <name> or manage files in .codex/",
+                            ),
+                            ratatui::text::Line::from(""),
+                        ];
+                        self.app_event_tx.send(AppEvent::InsertHistory(lines));
                     }
                     SlashCommand::Compact => {
                         if let AppState::Chat { widget } = &mut self.app_state {
@@ -417,6 +531,11 @@ impl App<'_> {
                         }));
                     }
                 },
+                AppEvent::DispatchCustomTask { name, args } => {
+                    if let AppState::Chat { widget } = &mut self.app_state {
+                        widget.submit_task_message_for(name, args);
+                    }
+                }
                 AppEvent::OnboardingAuthComplete(result) => {
                     if let AppState::Onboarding { screen } = &mut self.app_state {
                         screen.on_auth_complete(result);
@@ -523,7 +642,7 @@ impl App<'_> {
 
     /// Dispatch a KeyEvent to the current view and let it decide what to do
     /// with it.
-    fn dispatch_key_event(&mut self, key_event: KeyEvent) {
+    fn dispatch_key_event(&mut self, key_event: crossterm::event::KeyEvent) {
         match &mut self.app_state {
             AppState::Chat { widget } => {
                 widget.handle_key_event(key_event);

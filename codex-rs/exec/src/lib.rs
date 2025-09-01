@@ -34,6 +34,39 @@ use tracing_subscriber::prelude::*;
 use crate::event_processor::CodexStatus;
 use crate::event_processor::EventProcessor;
 
+#[derive(serde::Deserialize)]
+struct TaskConfigYaml {
+    tasks: Option<Vec<TaskYaml>>, // be tolerant
+}
+
+#[derive(serde::Deserialize)]
+struct TaskYaml {
+    name: String,
+    #[serde(default)]
+    prompt: Vec<String>,
+    #[serde(default)]
+    prompt_file: Option<String>,
+}
+
+fn load_task_prompt(cwd: &std::path::Path, name: &str) -> anyhow::Result<Option<String>> {
+    let path = cwd.join(".codex").join("tasks.yaml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path)?;
+    let cfg: TaskConfigYaml = serde_yaml::from_str(&text)?;
+    let tasks = cfg.tasks.unwrap_or_default();
+    if let Some(t) = tasks.into_iter().find(|t| t.name == name) {
+        if let Some(file) = t.prompt_file {
+            let p = cwd.join(".codex").join(file);
+            let s = std::fs::read_to_string(p)?;
+            return Ok(Some(s));
+        }
+        return Ok(Some(t.prompt.join("\n")));
+    }
+    Ok(None)
+}
+
 pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()> {
     let Cli {
         images,
@@ -49,16 +82,29 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         json: json_mode,
         sandbox_mode: sandbox_mode_cli_arg,
         prompt,
+        task,
         config_overrides,
     } = cli;
 
     // Determine the prompt based on CLI arg and/or stdin.
-    let prompt = match prompt {
-        Some(p) if p != "-" => p,
-        // Either `-` was passed or no positional arg.
-        maybe_dash => {
-            // When no arg (None) **and** stdin is a TTY, bail out early – unless the
-            // user explicitly forced reading via `-`.
+    let prompt = match (prompt, task.as_deref()) {
+        (Some(p), _) if p != "-" => p,
+        (maybe_dash, Some(_task_name)) => {
+            // For --task, allow empty user text; only read stdin if forced with '-'.
+            let force_stdin = matches!(maybe_dash.as_deref(), Some("-"));
+            if force_stdin {
+                let mut buffer = String::new();
+                if let Err(e) = std::io::stdin().read_to_string(&mut buffer) {
+                    eprintln!("Failed to read prompt from stdin: {e}");
+                    std::process::exit(1);
+                }
+                buffer
+            } else {
+                String::new()
+            }
+        }
+        (maybe_dash, None) => {
+            // Either `-` was passed or no positional arg.
             let force_stdin = matches!(maybe_dash.as_deref(), Some("-"));
 
             if std::io::stdin().is_terminal() && !force_stdin {
@@ -68,10 +114,6 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
                 std::process::exit(1);
             }
 
-            // Ensure the user knows we are waiting on stdin, as they may
-            // have gotten into this state by mistake. If so, and they are not
-            // writing to stdin, Codex will hang indefinitely, so this should
-            // help them debug in that case.
             if !force_stdin {
                 eprintln!("Reading prompt from stdin...");
             }
@@ -280,8 +322,38 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         }
     }
 
-    // Send the prompt.
-    let items: Vec<InputItem> = vec![InputItem::Text { text: prompt }];
+    // Build input items: if --task, prepend user_instructions with task prompt, then the user text.
+    let mut items: Vec<InputItem> = Vec::new();
+    if let Some(task_name) = task.as_deref() {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        match load_task_prompt(&cwd, task_name) {
+            Ok(Some(task_prompt)) => {
+                let wrapped =
+                    format!("<user_instructions>\n\n{task_prompt}\n\n</user_instructions>");
+                items.push(InputItem::Text { text: wrapped });
+            }
+            Ok(None) => {
+                eprintln!("Task '{task_name}' not found in .codex/tasks.yaml");
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("Failed to load task '{task_name}': {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if !prompt.is_empty() {
+        items.push(InputItem::Text {
+            text: prompt.clone(),
+        });
+    }
+    // If nothing to send (no task, no prompt), exit.
+    if items.is_empty() {
+        eprintln!("No input provided. Specify PROMPT or use --task <name>.");
+        std::process::exit(1);
+    }
+
+    // Send the input items as a single turn.
     let initial_prompt_task_id = codex.submit(Op::UserInput { items }).await?;
     info!("Sent prompt with event ID: {initial_prompt_task_id}");
 

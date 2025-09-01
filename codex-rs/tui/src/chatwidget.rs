@@ -155,6 +155,48 @@ impl ChatWidget<'_> {
             self.finalize_stream(kind);
         }
     }
+    /// Submit a custom task by first injecting a user_instructions block with the task prompt
+    /// and then the user's text as a separate input item. Only the user text is shown in history.
+    pub(crate) fn submit_task_message_for(&mut self, task_name: String, user_text: String) {
+        let prompt = match crate::tasks::get_task_prompt(&self.config.cwd, &task_name) {
+            Ok(Some(p)) => p,
+            Ok(None) => String::new(),
+            Err(e) => {
+                tracing::error!("failed to load task prompt for {}: {}", task_name, e);
+                String::new()
+            }
+        };
+
+        let mut items: Vec<InputItem> = Vec::new();
+        if !prompt.trim().is_empty() {
+            let wrapped = format!("<user_instructions>\n\n{prompt}\n\n</user_instructions>");
+            items.push(InputItem::Text { text: wrapped });
+        }
+        if !user_text.trim().is_empty() {
+            items.push(InputItem::Text {
+                text: user_text.clone(),
+            });
+        }
+        if items.is_empty() {
+            return;
+        }
+        self.codex_op_tx
+            .send(Op::UserInput { items })
+            .unwrap_or_else(|e| {
+                tracing::error!("failed to send task message: {e}");
+            });
+
+        if !user_text.trim().is_empty() {
+            self.codex_op_tx
+                .send(Op::AddToHistory {
+                    text: user_text.clone(),
+                })
+                .unwrap_or_else(|e| {
+                    tracing::error!("failed to send AddHistory op: {e}");
+                });
+            self.add_to_history(HistoryCell::new_user_prompt(user_text));
+        }
+    }
     pub(crate) fn new(
         config: Config,
         app_event_tx: AppEventSender,
@@ -207,6 +249,7 @@ impl ChatWidget<'_> {
                 app_event_tx,
                 has_input_focus: true,
                 enhanced_keys_supported,
+                cwd: config.cwd.clone(),
             }),
             active_history_cell: None,
             config,

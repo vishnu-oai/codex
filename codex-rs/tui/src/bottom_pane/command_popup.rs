@@ -8,19 +8,50 @@ use super::selection_popup_common::GenericDisplayRow;
 use super::selection_popup_common::render_rows;
 use crate::slash_command::SlashCommand;
 use crate::slash_command::built_in_slash_commands;
+use crate::tasks;
 use codex_common::fuzzy_match::fuzzy_match;
+
+#[derive(Debug, Clone)]
+pub(crate) enum CommandEntry {
+    BuiltIn(SlashCommand),
+    CustomTask(String),
+}
+
+impl CommandEntry {
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            CommandEntry::BuiltIn(c) => c.command(),
+            CommandEntry::CustomTask(name) => name.as_str(),
+        }
+    }
+    pub(crate) fn description(&self) -> String {
+        match self {
+            CommandEntry::BuiltIn(c) => c.description().to_string(),
+            CommandEntry::CustomTask(_) => "run custom task".to_string(),
+        }
+    }
+}
 
 pub(crate) struct CommandPopup {
     command_filter: String,
-    all_commands: Vec<(&'static str, SlashCommand)>,
+    all_commands: Vec<(String, CommandEntry)>,
     state: ScrollState,
 }
 
 impl CommandPopup {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(cwd: std::path::PathBuf) -> Self {
+        let mut all: Vec<(String, CommandEntry)> = Vec::new();
+        for (name, cmd) in built_in_slash_commands() {
+            all.push((name.to_string(), CommandEntry::BuiltIn(cmd)));
+        }
+        if let Ok(names) = tasks::list_task_names(&cwd) {
+            for name in names {
+                all.push((name.clone(), CommandEntry::CustomTask(name)));
+            }
+        }
         Self {
             command_filter: String::new(),
-            all_commands: built_in_slash_commands(),
+            all_commands: all,
             state: ScrollState::new(),
         }
     }
@@ -64,25 +95,25 @@ impl CommandPopup {
 
     /// Compute fuzzy-filtered matches paired with optional highlight indices and score.
     /// Sorted by ascending score, then by command name for stability.
-    fn filtered(&self) -> Vec<(&SlashCommand, Option<Vec<usize>>, i32)> {
+    fn filtered(&self) -> Vec<(&CommandEntry, Option<Vec<usize>>, i32)> {
         let filter = self.command_filter.trim();
-        let mut out: Vec<(&SlashCommand, Option<Vec<usize>>, i32)> = Vec::new();
+        let mut out: Vec<(&CommandEntry, Option<Vec<usize>>, i32)> = Vec::new();
         if filter.is_empty() {
             for (_, cmd) in self.all_commands.iter() {
                 out.push((cmd, None, 0));
             }
         } else {
             for (_, cmd) in self.all_commands.iter() {
-                if let Some((indices, score)) = fuzzy_match(cmd.command(), filter) {
+                if let Some((indices, score)) = fuzzy_match(cmd.name(), filter) {
                     out.push((cmd, Some(indices), score));
                 }
             }
         }
-        out.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.0.command().cmp(b.0.command())));
+        out.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.0.name().cmp(b.0.name())));
         out
     }
 
-    fn filtered_commands(&self) -> Vec<&SlashCommand> {
+    fn filtered_commands(&self) -> Vec<&CommandEntry> {
         self.filtered().into_iter().map(|(c, _, _)| c).collect()
     }
 
@@ -104,11 +135,11 @@ impl CommandPopup {
     }
 
     /// Return currently selected command, if any.
-    pub(crate) fn selected_command(&self) -> Option<&SlashCommand> {
+    pub(crate) fn selected_command(&self) -> Option<CommandEntry> {
         let matches = self.filtered_commands();
         self.state
             .selected_idx
-            .and_then(|idx| matches.get(idx).copied())
+            .and_then(|idx| matches.get(idx).cloned().cloned())
     }
 }
 
@@ -121,10 +152,11 @@ impl WidgetRef for CommandPopup {
             matches
                 .into_iter()
                 .map(|(cmd, indices, _)| GenericDisplayRow {
-                    name: format!("/{}", cmd.command()),
+                    name: format!("/{}", cmd.name()),
                     match_indices: indices.map(|v| v.into_iter().map(|i| i + 1).collect()),
                     is_current: false,
-                    description: Some(cmd.description().to_string()),
+                    description: Some(cmd.description()),
+                    is_custom: matches!(cmd, CommandEntry::CustomTask(_)),
                 })
                 .collect()
         };
@@ -138,7 +170,8 @@ mod tests {
 
     #[test]
     fn filter_includes_init_when_typing_prefix() {
-        let mut popup = CommandPopup::new();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let mut popup = CommandPopup::new(cwd);
         // Simulate the composer line starting with '/in' so the popup filters
         // matching commands by prefix.
         popup.on_composer_text_change("/in".to_string());
@@ -147,22 +180,25 @@ mod tests {
         // one of the matches is the new "init" command.
         let matches = popup.filtered_commands();
         assert!(
-            matches.iter().any(|cmd| cmd.command() == "init"),
+            matches
+                .iter()
+                .any(|cmd| matches!(cmd, CommandEntry::BuiltIn(c) if c.command() == "init")),
             "expected '/init' to appear among filtered commands"
         );
     }
 
     #[test]
     fn selecting_init_by_exact_match() {
-        let mut popup = CommandPopup::new();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let mut popup = CommandPopup::new(cwd);
         popup.on_composer_text_change("/init".to_string());
 
         // When an exact match exists, the selected command should be that
         // command by default.
         let selected = popup.selected_command();
         match selected {
-            Some(cmd) => assert_eq!(cmd.command(), "init"),
-            None => panic!("expected a selected command for exact match"),
+            Some(CommandEntry::BuiltIn(cmd)) => assert_eq!(cmd.command(), "init"),
+            _ => panic!("expected a selected command for exact match"),
         }
     }
 }

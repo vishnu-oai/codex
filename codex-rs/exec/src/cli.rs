@@ -63,6 +63,11 @@ pub struct Cli {
     #[arg(long = "output-last-message")]
     pub last_message_file: Option<PathBuf>,
 
+    /// Custom task to prepend as user_instructions (
+    /// read from .codex/tasks.yaml and optional prompt_file).
+    #[arg(long = "task")]
+    pub task: Option<String>,
+
     /// Initial instructions for the agent. If not provided as an argument (or
     /// if `-` is used), instructions are read from stdin.
     #[arg(value_name = "PROMPT")]

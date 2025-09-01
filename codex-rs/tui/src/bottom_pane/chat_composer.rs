@@ -21,6 +21,7 @@ use ratatui::widgets::StatefulWidgetRef;
 use ratatui::widgets::WidgetRef;
 
 use super::chat_composer_history::ChatComposerHistory;
+use super::command_popup::CommandEntry;
 use super::command_popup::CommandPopup;
 use super::file_search_popup::FileSearchPopup;
 
@@ -28,6 +29,7 @@ use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::textarea::TextArea;
 use crate::bottom_pane::textarea::TextAreaState;
+use crate::slash_command::built_in_slash_commands;
 use codex_file_search::FileMatch;
 use std::cell::RefCell;
 
@@ -61,6 +63,7 @@ pub(crate) struct ChatComposer {
     pending_pastes: Vec<(String, String)>,
     token_usage_info: Option<TokenUsageInfo>,
     has_focus: bool,
+    cwd: std::path::PathBuf,
 }
 
 /// Popup state – at most one can be visible at any time.
@@ -75,6 +78,7 @@ impl ChatComposer {
         has_input_focus: bool,
         app_event_tx: AppEventSender,
         enhanced_keys_supported: bool,
+        cwd: std::path::PathBuf,
     ) -> Self {
         let use_shift_enter_hint = enhanced_keys_supported;
 
@@ -91,6 +95,7 @@ impl ChatComposer {
             pending_pastes: Vec::new(),
             token_usage_info: None,
             has_focus: has_input_focus,
+            cwd,
         }
     }
 
@@ -240,15 +245,15 @@ impl ChatComposer {
             KeyEvent {
                 code: KeyCode::Tab, ..
             } => {
-                if let Some(cmd) = popup.selected_command() {
+                if let Some(entry) = popup.selected_command() {
                     let first_line = self.textarea.text().lines().next().unwrap_or("");
 
                     let starts_with_cmd = first_line
                         .trim_start()
-                        .starts_with(&format!("/{}", cmd.command()));
+                        .starts_with(&format!("/{}", entry.name()));
 
                     if !starts_with_cmd {
-                        self.textarea.set_text(&format!("/{} ", cmd.command()));
+                        self.textarea.set_text(&format!("/{} ", entry.name()));
                     }
                 }
                 (InputResult::None, true)
@@ -258,16 +263,37 @@ impl ChatComposer {
                 modifiers: KeyModifiers::NONE,
                 ..
             } => {
-                if let Some(cmd) = popup.selected_command() {
-                    // Send command to the app layer.
-                    self.app_event_tx.send(AppEvent::DispatchCommand(*cmd));
+                if let Some(entry) = popup.selected_command() {
+                    match entry {
+                        CommandEntry::BuiltIn(cmd) => {
+                            // Extract args after the command token, if any.
+                            let first_line = self.textarea.text().lines().next().unwrap_or("");
+                            let after_slash = first_line.strip_prefix('/').unwrap_or("");
+                            let mut parts = after_slash.splitn(2, char::is_whitespace);
+                            let _cmd_tok = parts.next();
+                            let rest = parts.next().unwrap_or("").trim_start().to_string();
 
-                    // Clear textarea so no residual text remains.
-                    self.textarea.set_text("");
+                            // Dispatch immediately.
+                            self.app_event_tx
+                                .send(AppEvent::DispatchCommand { cmd, args: rest });
 
-                    // Hide popup since the command has been dispatched.
-                    self.active_popup = ActivePopup::None;
-                    return (InputResult::None, true);
+                            // Clear textarea and hide popup.
+                            self.textarea.set_text("");
+                            self.active_popup = ActivePopup::None;
+                            return (InputResult::None, true);
+                        }
+                        CommandEntry::CustomTask(name) => {
+                            // Behave like Tab: fill, then hide so next Enter dispatches.
+                            let first_line = self.textarea.text().lines().next().unwrap_or("");
+                            let starts_with_cmd =
+                                first_line.trim_start().starts_with(&format!("/{name}"));
+                            if !starts_with_cmd {
+                                self.textarea.set_text(&format!("/{name} "));
+                            }
+                            self.active_popup = ActivePopup::None;
+                            return (InputResult::None, true);
+                        }
+                    }
                 }
                 // Fallback to default newline handling if no command selected.
                 self.handle_key_event_without_popup(key_event)
@@ -513,6 +539,38 @@ impl ChatComposer {
                 }
                 self.pending_pastes.clear();
 
+                // If text begins with a slash, attempt to dispatch a command even when popup is hidden.
+                if let Some(stripped) = text.strip_prefix('/') {
+                    let token = stripped.trim_start();
+                    let mut parts = token.splitn(2, char::is_whitespace);
+                    let cmd_token = parts.next().unwrap_or("");
+                    let rest = parts.next().unwrap_or("").trim_start().to_string();
+
+                    if !cmd_token.is_empty() {
+                        if let Some((_, cmd)) = built_in_slash_commands()
+                            .into_iter()
+                            .find(|(name, _)| *name == cmd_token)
+                        {
+                            // Built-in slash command
+                            self.app_event_tx
+                                .send(AppEvent::DispatchCommand { cmd, args: rest });
+                            return (InputResult::None, true);
+                        } else {
+                            // Custom task
+                            if crate::tasks::list_task_names(&self.cwd)
+                                .map(|names| names.into_iter().any(|n| n == cmd_token))
+                                .unwrap_or(false)
+                            {
+                                self.app_event_tx.send(AppEvent::DispatchCustomTask {
+                                    name: cmd_token.to_string(),
+                                    args: rest,
+                                });
+                                return (InputResult::None, true);
+                            }
+                        }
+                    }
+                }
+
                 if text.is_empty() {
                     (InputResult::None, true)
                 } else {
@@ -582,19 +640,48 @@ impl ChatComposer {
     fn sync_command_popup(&mut self) {
         let first_line = self.textarea.text().lines().next().unwrap_or("");
         let input_starts_with_slash = first_line.starts_with('/');
+
+        // Detect if the text begins with a fully-typed known command token (built-in or custom).
+        let mut is_known_cmd = false;
+        if input_starts_with_slash {
+            if let Some(stripped) = first_line.strip_prefix('/') {
+                let token = stripped.trim_start();
+                let mut parts = token.splitn(2, char::is_whitespace);
+                let cmd_token = parts.next().unwrap_or("");
+                if !cmd_token.is_empty() {
+                    let built_in = built_in_slash_commands()
+                        .into_iter()
+                        .any(|(name, _)| name == cmd_token);
+                    let custom = crate::tasks::list_task_names(&self.cwd)
+                        .map(|names| names.into_iter().any(|n| n == cmd_token))
+                        .unwrap_or(false);
+                    is_known_cmd = built_in || custom;
+                }
+            }
+        }
+
         match &mut self.active_popup {
             ActivePopup::Command(popup) => {
                 if input_starts_with_slash {
-                    popup.on_composer_text_change(first_line.to_string());
+                    if is_known_cmd {
+                        // Hide the command popup so Enter will dispatch via the no‑popup path.
+                        self.active_popup = ActivePopup::None;
+                    } else {
+                        popup.on_composer_text_change(first_line.to_string());
+                    }
                 } else {
                     self.active_popup = ActivePopup::None;
                 }
             }
             _ => {
                 if input_starts_with_slash {
-                    let mut command_popup = CommandPopup::new();
-                    command_popup.on_composer_text_change(first_line.to_string());
-                    self.active_popup = ActivePopup::Command(command_popup);
+                    if is_known_cmd {
+                        // Do not show the popup for fully-typed known commands.
+                    } else {
+                        let mut command_popup = CommandPopup::new(self.cwd.clone());
+                        command_popup.on_composer_text_change(first_line.to_string());
+                        self.active_popup = ActivePopup::Command(command_popup);
+                    }
                 }
             }
         }
@@ -918,7 +1005,7 @@ mod tests {
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let sender = AppEventSender::new(tx);
-        let mut composer = ChatComposer::new(true, sender, false);
+        let mut composer = ChatComposer::new(true, sender, false, std::path::PathBuf::new());
 
         let needs_redraw = composer.handle_paste("hello".to_string());
         assert!(needs_redraw);
@@ -941,7 +1028,7 @@ mod tests {
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let sender = AppEventSender::new(tx);
-        let mut composer = ChatComposer::new(true, sender, false);
+        let mut composer = ChatComposer::new(true, sender, false, std::path::PathBuf::new());
 
         let large = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 10);
         let needs_redraw = composer.handle_paste(large.clone());
@@ -970,7 +1057,7 @@ mod tests {
         let large = "y".repeat(LARGE_PASTE_CHAR_THRESHOLD + 1);
         let (tx, _rx) = std::sync::mpsc::channel();
         let sender = AppEventSender::new(tx);
-        let mut composer = ChatComposer::new(true, sender, false);
+        let mut composer = ChatComposer::new(true, sender, false, std::path::PathBuf::new());
 
         composer.handle_paste(large);
         assert_eq!(composer.pending_pastes.len(), 1);
@@ -1006,7 +1093,8 @@ mod tests {
 
         for (name, input) in test_cases {
             // Create a fresh composer for each test case
-            let mut composer = ChatComposer::new(true, sender.clone(), false);
+            let mut composer =
+                ChatComposer::new(true, sender.clone(), false, std::path::PathBuf::new());
 
             if let Some(text) = input {
                 composer.handle_paste(text);
@@ -1044,7 +1132,7 @@ mod tests {
 
         let (tx, rx) = std::sync::mpsc::channel();
         let sender = AppEventSender::new(tx);
-        let mut composer = ChatComposer::new(true, sender, false);
+        let mut composer = ChatComposer::new(true, sender, false, std::path::PathBuf::new());
 
         // Type the slash command.
         for ch in [
@@ -1069,7 +1157,7 @@ mod tests {
 
         // Verify a DispatchCommand event for the "init" command was sent.
         match rx.try_recv() {
-            Ok(AppEvent::DispatchCommand(cmd)) => {
+            Ok(AppEvent::DispatchCommand { cmd, .. }) => {
                 assert_eq!(cmd.command(), "init");
             }
             Ok(_other) => panic!("unexpected app event"),
@@ -1086,7 +1174,7 @@ mod tests {
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let sender = AppEventSender::new(tx);
-        let mut composer = ChatComposer::new(true, sender, false);
+        let mut composer = ChatComposer::new(true, sender, false, std::path::PathBuf::new());
 
         // Define test cases: (paste content, is_large)
         let test_cases = [
@@ -1159,7 +1247,7 @@ mod tests {
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let sender = AppEventSender::new(tx);
-        let mut composer = ChatComposer::new(true, sender, false);
+        let mut composer = ChatComposer::new(true, sender, false, std::path::PathBuf::new());
 
         // Define test cases: (content, is_large)
         let test_cases = [
@@ -1225,7 +1313,7 @@ mod tests {
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let sender = AppEventSender::new(tx);
-        let mut composer = ChatComposer::new(true, sender, false);
+        let mut composer = ChatComposer::new(true, sender, false, std::path::PathBuf::new());
 
         // Define test cases: (cursor_position_from_end, expected_pending_count)
         let test_cases = [

@@ -20,6 +20,10 @@ pub enum SlashCommand {
     Prompts,
     Logout,
     Quit,
+    InitTasks,
+    AddTask,
+    ListTask,
+    AddTaskFile,
     #[cfg(debug_assertions)]
     TestApproval,
 }
@@ -36,6 +40,10 @@ impl SlashCommand {
             SlashCommand::Status => "show current session configuration and token usage",
             SlashCommand::Prompts => "show example prompts",
             SlashCommand::Logout => "log out of Codex",
+            SlashCommand::InitTasks => "initialize or reset custom tasks file",
+            SlashCommand::AddTask => "add a custom task: /add-task <name> \"prompt\"",
+            SlashCommand::ListTask => "list configured custom tasks",
+            SlashCommand::AddTaskFile => "link a task to a file: /add-task-file <name> <file>",
             #[cfg(debug_assertions)]
             SlashCommand::TestApproval => "test approval request",
         }

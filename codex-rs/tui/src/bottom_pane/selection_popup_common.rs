@@ -22,6 +22,7 @@ pub(crate) struct GenericDisplayRow {
     pub match_indices: Option<Vec<usize>>, // indices to bold (char positions)
     pub is_current: bool,
     pub description: Option<String>, // optional grey text after the name
+    pub is_custom: bool,             // whether this row represents a custom task
 }
 
 impl GenericDisplayRow {}
@@ -71,14 +72,22 @@ pub(crate) fn render_rows(
                 match_indices,
                 is_current,
                 description,
+                is_custom,
             } = row;
+
+            // Choose base color for the name.
+            let base_color = if *is_custom {
+                Color::Magenta
+            } else {
+                Color::White
+            };
 
             // Highlight fuzzy indices when present.
             let mut spans: Vec<Span> = Vec::with_capacity(name.len());
             if let Some(idxs) = match_indices.as_ref() {
                 let mut idx_iter = idxs.iter().peekable();
                 for (char_idx, ch) in name.chars().enumerate() {
-                    let mut style = Style::default();
+                    let mut style = Style::default().fg(base_color);
                     if idx_iter.peek().is_some_and(|next| **next == char_idx) {
                         idx_iter.next();
                         style = style.add_modifier(Modifier::BOLD);
@@ -86,7 +95,7 @@ pub(crate) fn render_rows(
                     spans.push(Span::styled(ch.to_string(), style));
                 }
             } else {
-                spans.push(Span::raw(name.clone()));
+                spans.push(Span::styled(name.clone(), Style::default().fg(base_color)));
             }
 
             if let Some(desc) = description.as_ref() {
