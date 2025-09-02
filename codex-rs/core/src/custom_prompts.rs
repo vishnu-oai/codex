@@ -67,6 +67,7 @@ pub async fn discover_prompts_in_excluding(
             name,
             path,
             content,
+            description: None,
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));

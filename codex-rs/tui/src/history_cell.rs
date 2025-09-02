@@ -348,6 +348,23 @@ pub(crate) fn new_user_prompt(message: String) -> PlainHistoryCell {
     PlainHistoryCell { lines }
 }
 
+/// Render a user submission that invokes a custom task: "/name <args>".
+/// The command (with leading slash) is bold green; the arguments follow as plain text.
+pub(crate) fn new_user_task_command(command: &str, args: &str) -> PlainHistoryCell {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(""));
+    lines.push(Line::from("user".cyan().bold()));
+    let cmd_text = format!("/{command}");
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    spans.push(cmd_text.green().bold());
+    if !args.trim().is_empty() {
+        spans.push(Span::raw(" "));
+        spans.push(Span::raw(args.to_string()));
+    }
+    lines.push(Line::from(spans));
+    PlainHistoryCell { lines }
+}
+
 pub(crate) fn new_active_exec_command(
     command: Vec<String>,
     parsed: Vec<ParsedCommand>,

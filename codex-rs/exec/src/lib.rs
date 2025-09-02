@@ -7,6 +7,7 @@ use std::io::IsTerminal;
 use std::io::Read;
 use std::path::PathBuf;
 
+use anyhow::Context;
 pub use cli::Cli;
 use codex_core::BUILT_IN_OSS_MODEL_PROVIDER_ID;
 use codex_core::ConversationManager;
@@ -49,6 +50,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         sandbox_mode: sandbox_mode_cli_arg,
         prompt,
         config_overrides,
+        ..
     } = cli;
 
     // Determine the prompt based on CLI arg and/or stdin.
@@ -162,7 +164,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         }
     };
 
-    let config = Config::load_with_cli_overrides(cli_kv_overrides, overrides)?;
+    let config = Config::load_with_cli_overrides(cli_kv_overrides, overrides.clone())?;
     let mut event_processor: Box<dyn EventProcessor> = if json_mode {
         Box::new(EventProcessorWithJsonOutput::new(last_message_file.clone()))
     } else {
@@ -259,6 +261,52 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
             }
         }
     }
+
+    // Optionally prepend a custom task's content from .codex/tasks.yaml when --task is provided.
+    let prompt = if let Some(task_name) = cli.task {
+        // Determine working directory (prefer config.cwd, else current_dir).
+        let cwd = overrides.cwd.clone().unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
+        let tasks_path = cwd.join(".codex").join("tasks.yaml");
+        let merged = (|| -> anyhow::Result<String> {
+            if !tasks_path.exists() {
+                anyhow::bail!("tasks.yaml not found at {}", tasks_path.display());
+            }
+            #[derive(serde::Deserialize)]
+            struct TaskCfg {
+                tasks: Vec<Task>,
+            }
+            #[derive(serde::Deserialize)]
+            struct Task {
+                name: String,
+                #[serde(default)]
+                prompt: Vec<String>,
+                prompt_file: Option<String>,
+            }
+            let s = std::fs::read_to_string(&tasks_path)?;
+            let cfg: TaskCfg = serde_yaml::from_str(&s)?;
+            let Some(t) = cfg.tasks.into_iter().find(|t| t.name == task_name) else {
+                anyhow::bail!("task '{}' not found in {}", task_name, tasks_path.display());
+            };
+            let task_text = if let Some(rel) = t.prompt_file {
+                let p = cwd.join(".codex").join(rel);
+                std::fs::read_to_string(&p).context(format!("reading {}", p.display()))?
+            } else {
+                t.prompt.join("\n")
+            };
+            Ok(format!("{task_text}\n\n{prompt}"))
+        })();
+        match merged {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("--task error: {e}");
+                prompt
+            }
+        }
+    } else {
+        prompt
+    };
 
     // Send the prompt.
     let items: Vec<InputItem> = vec![InputItem::Text { text: prompt }];

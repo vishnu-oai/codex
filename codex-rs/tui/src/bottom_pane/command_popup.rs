@@ -185,12 +185,14 @@ impl WidgetRef for CommandPopup {
                         match_indices: indices.map(|v| v.into_iter().map(|i| i + 1).collect()),
                         is_current: false,
                         description: Some(cmd.description().to_string()),
+                        is_custom: false,
                     },
                     CommandItem::UserPrompt(i) => GenericDisplayRow {
                         name: format!("/{}", self.prompts[i].name),
                         match_indices: indices.map(|v| v.into_iter().map(|i| i + 1).collect()),
                         is_current: false,
-                        description: Some("send saved prompt".to_string()),
+                        description: self.prompts[i].description.clone(),
+                        is_custom: true,
                     },
                 })
                 .collect()
@@ -245,11 +247,13 @@ mod tests {
                 name: "foo".to_string(),
                 path: "/tmp/foo.md".to_string().into(),
                 content: "hello from foo".to_string(),
+                description: None,
             },
             CustomPrompt {
                 name: "bar".to_string(),
                 path: "/tmp/bar.md".to_string().into(),
                 content: "hello from bar".to_string(),
+                description: None,
             },
         ];
         let popup = CommandPopup::new(prompts);
@@ -272,6 +276,7 @@ mod tests {
             name: "init".to_string(),
             path: "/tmp/init.md".to_string().into(),
             content: "should be ignored".to_string(),
+            description: None,
         }]);
         let items = popup.filtered_items();
         let has_collision_prompt = items.into_iter().any(|it| match it {

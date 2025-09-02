@@ -432,26 +432,65 @@ impl ChatComposer {
                 ..
             } => {
                 if let Some(sel) = popup.selected_item() {
-                    // Clear textarea so no residual text remains.
-                    self.textarea.set_text("");
-                    // Capture any needed data from popup before clearing it.
-                    let prompt_content = match sel {
-                        CommandItem::UserPrompt(idx) => {
-                            popup.prompt_content(idx).map(|s| s.to_string())
+                    // For built-ins that require arguments, insert or submit depending on args.
+                    if let CommandItem::Builtin(cmd) = sel {
+                        if matches!(cmd, SlashCommand::AddTask | SlashCommand::AddTaskFile) {
+                            let first_line = self.textarea.text().lines().next().unwrap_or("");
+                            let starts_with_cmd = first_line
+                                .trim_start()
+                                .starts_with(&format!("/{}", cmd.command()));
+                            let has_args = if starts_with_cmd {
+                                let rest = first_line
+                                    .trim_start()
+                                    .strip_prefix(&format!("/{}", cmd.command()))
+                                    .unwrap_or("");
+                                !rest.trim_start().is_empty()
+                            } else {
+                                false
+                            };
+                            if has_args {
+                                // Dismiss popup and submit normally
+                                self.active_popup = ActivePopup::None;
+                                return self.handle_key_event_without_popup(key_event);
+                            }
+                            if !starts_with_cmd {
+                                self.textarea.set_text(&format!("/{} ", cmd.command()));
+                                let end = self.textarea.text().len();
+                                self.textarea.set_cursor(end);
+                            }
+                            // Dismiss popup and let user continue typing args.
+                            self.active_popup = ActivePopup::None;
+                            return (InputResult::None, true);
                         }
-                        _ => None,
-                    };
-                    // Hide popup since an action has been dispatched.
-                    self.active_popup = ActivePopup::None;
+                    }
 
+                    // Hide popup since an action has been dispatched.
                     match sel {
                         CommandItem::Builtin(cmd) => {
+                            // Clear textarea so no residual text remains.
+                            self.textarea.set_text("");
+                            self.active_popup = ActivePopup::None;
                             return (InputResult::Command(cmd), true);
                         }
-                        CommandItem::UserPrompt(_) => {
-                            if let Some(contents) = prompt_content {
-                                return (InputResult::Submitted(contents), true);
+                        CommandItem::UserPrompt(idx) => {
+                            if let Some(name) = popup.prompt_name(idx) {
+                                let first_line = self.textarea.text().lines().next().unwrap_or("");
+                                let trimmed = first_line.trim_start();
+                                let prefix = format!("/{name}");
+                                if trimmed.starts_with(&prefix) {
+                                    // If remainder is empty or whitespace-only, treat as no-args and submit.
+                                    // If there are args, also submit.
+                                    self.active_popup = ActivePopup::None;
+                                    return self.handle_key_event_without_popup(key_event);
+                                }
+                                // Not fully typed → autocomplete and keep editing
+                                self.textarea.set_text(&format!("/{name} "));
+                                let end = self.textarea.text().len();
+                                self.textarea.set_cursor(end);
+                                self.active_popup = ActivePopup::None;
+                                return (InputResult::None, true);
                             }
+                            self.active_popup = ActivePopup::None;
                             return (InputResult::None, true);
                         }
                     }
@@ -2154,6 +2193,7 @@ mod tests {
             name: "my-prompt".to_string(),
             path: "/tmp/my-prompt.md".to_string().into(),
             content: prompt_text.to_string(),
+            description: None,
         }]);
 
         type_chars_humanlike(

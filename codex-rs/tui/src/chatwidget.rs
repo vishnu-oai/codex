@@ -727,7 +727,192 @@ impl ChatWidget {
             _ => {
                 match self.bottom_pane.handle_key_event(key_event) {
                     InputResult::Submitted(text) => {
-                        // If a task is running, queue the user input to be sent after the turn completes.
+                        // Intercept slash-commands that require arguments and handle locally.
+                        if let Some(stripped) = text.strip_prefix('/') {
+                            let mut parts = stripped.split_whitespace();
+                            if let Some(cmd) = parts.next() {
+                                match cmd {
+                                    // Initialize or reset tasks.yaml
+                                    "init-tasks" => {
+                                        match crate::tasks::init_tasks_file(&self.config.cwd) {
+                                            Ok(path) => {
+                                                self.add_to_history(history_cell::new_user_prompt(
+                                                    format!(
+                                                        "Initialized tasks file at {}",
+                                                        path.display()
+                                                    ),
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                self.add_to_history(history_cell::new_error_event(
+                                                    format!("/init-tasks failed: {e}"),
+                                                ));
+                                            }
+                                        }
+                                        return;
+                                    }
+                                    // Add or update an inline task: /add-task <name> <prompt...>
+                                    "add-task" => {
+                                        if let Some(name) = parts.next() {
+                                            let prompt = stripped
+                                                .strip_prefix("add-task")
+                                                .unwrap_or("")
+                                                .trim_start()
+                                                .strip_prefix(name)
+                                                .unwrap_or("")
+                                                .trim_start()
+                                                .to_string();
+                                            if prompt.is_empty() {
+                                                self.add_to_history(history_cell::new_error_event(
+                                                    "Usage: /add-task <name> <prompt> [--desc 'text']".to_string(),
+                                                ));
+                                            } else {
+                                                // Support optional trailing description flag: --desc 'text' or "text"
+                                                let mut desc: Option<String> = None;
+                                                let mut body = prompt.clone();
+                                                if let Some(idx) = prompt.rfind("--desc ") {
+                                                    let tail = &prompt[idx + 7..];
+                                                    let d = tail
+                                                        .trim()
+                                                        .trim_matches('"')
+                                                        .trim_matches('\'');
+                                                    if !d.is_empty() {
+                                                        desc = Some(d.to_string());
+                                                    }
+                                                    body = prompt[..idx].trim_end().to_string();
+                                                }
+                                                match crate::tasks::add_or_update_task(
+                                                    &self.config.cwd,
+                                                    name,
+                                                    body,
+                                                    desc,
+                                                ) {
+                                                    Ok(()) => {
+                                                        self.add_to_history(
+                                                            history_cell::new_user_prompt(format!(
+                                                                "Saved task '{name}'"
+                                                            )),
+                                                        );
+                                                        self.submit_op(Op::ListCustomPrompts);
+                                                    }
+                                                    Err(e) => self.add_to_history(
+                                                        history_cell::new_error_event(format!(
+                                                            "/add-task failed: {e}"
+                                                        )),
+                                                    ),
+                                                }
+                                            }
+                                        } else {
+                                            self.add_to_history(history_cell::new_error_event(
+                                                "Usage: /add-task <name> <prompt>".to_string(),
+                                            ));
+                                        }
+                                        return;
+                                    }
+                                    // Link a task to an external prompt file relative to .codex
+                                    "add-task-file" => {
+                                        let name = parts.next();
+                                        let rel = parts.next();
+                                        match (name, rel) {
+                                            (Some(name), Some(rel)) => {
+                                                // Parse optional description flag from the remainder
+                                                let mut desc: Option<String> = None;
+                                                if let Some(idx) = stripped.find(rel) {
+                                                    let tail = &stripped[idx + rel.len()..];
+                                                    if let Some(di) = tail.find("--desc ") {
+                                                        let d = tail[di + 7..].trim().trim_matches('"').trim_matches('\'');
+                                                        if !d.is_empty() { desc = Some(d.to_string()); }
+                                                    }
+                                                }
+                                                match crate::tasks::add_or_update_task_file(&self.config.cwd, name, rel, desc) {
+                                                Ok(path) => {
+                                                    self.add_to_history(history_cell::new_user_prompt(format!(
+                                                        "Task '{}' linked to {}",
+                                                        name,
+                                                        path.display()
+                                                    )));
+                                                    self.submit_op(Op::ListCustomPrompts);
+                                                }
+                                                Err(e) => self.add_to_history(history_cell::new_error_event(format!("/add-task-file failed: {e}"))),
+                                            }},
+                                            _ => self.add_to_history(history_cell::new_error_event(
+                                                "Usage: /add-task-file <name> <file> [--desc 'text']".to_string(),
+                                            )),
+                                        }
+                                        return;
+                                    }
+                                    // List existing task names
+                                    "list-task" => {
+                                        self.show_list_tasks();
+                                        return;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+
+                        // Not a handled slash command: support invoking custom tasks by name.
+                        if let Some(stripped) = text.strip_prefix('/') {
+                            let mut parts = stripped.splitn(2, char::is_whitespace);
+                            let name = parts.next().unwrap_or("");
+                            let args = parts.next().unwrap_or("").trim().to_string();
+
+                            // Resolve task prompt from tasks.yaml first, then from $CODEX_HOME/prompts/<name>.md.
+                            let task_prompt = crate::tasks::get_task_prompt(&self.config.cwd, name)
+                                .ok()
+                                .flatten()
+                                .or_else(|| {
+                                    if let Some(dir) =
+                                        codex_core::custom_prompts::default_prompts_dir()
+                                    {
+                                        let p = dir.join(format!("{name}.md"));
+                                        std::fs::read_to_string(&p).ok()
+                                    } else {
+                                        None
+                                    }
+                                });
+
+                            if let Some(prompt_text) = task_prompt {
+                                // Build the combined text that the agent should receive.
+                                let combined = if args.is_empty() {
+                                    prompt_text
+                                } else {
+                                    format!("{prompt_text}\n\n{args}")
+                                };
+
+                                // Send input (including any attached images) with the combined text.
+                                let mut items: Vec<InputItem> = Vec::new();
+                                items.push(InputItem::Text { text: combined });
+                                for path in self.bottom_pane.take_recent_submission_images() {
+                                    items.push(InputItem::LocalImage { path });
+                                }
+                                self.codex_op_tx
+                                    .send(Op::UserInput { items })
+                                    .unwrap_or_else(|e| {
+                                        tracing::error!("failed to send message: {e}");
+                                    });
+
+                                // Store a concise history entry: "/name <args>".
+                                let display = if args.is_empty() {
+                                    format!("/{name}")
+                                } else {
+                                    format!("/{name} {args}")
+                                };
+                                self.codex_op_tx
+                                    .send(Op::AddToHistory {
+                                        text: display.clone(),
+                                    })
+                                    .unwrap_or_else(|e| {
+                                        tracing::error!("failed to send AddHistory op: {e}")
+                                    });
+                                self.add_to_history(history_cell::new_user_task_command(
+                                    name, &args,
+                                ));
+                                return;
+                            }
+                        }
+
+                        // Fallback: send literal user input.
                         let user_message = UserMessage {
                             text,
                             image_paths: self.bottom_pane.take_recent_submission_images(),
@@ -805,13 +990,8 @@ impl ChatWidget {
                 let tx = self.app_event_tx.clone();
                 tokio::spawn(async move {
                     let text = match get_git_diff().await {
-                        Ok((is_git_repo, diff_text)) => {
-                            if is_git_repo {
-                                diff_text
-                            } else {
-                                "`/diff` — _not inside a git repository_".to_string()
-                            }
-                        }
+                        Ok((true, diff)) => diff,
+                        Ok((false, _)) => "`/diff` — _not inside a git repository_".to_string(),
                         Err(e) => format!("Failed to compute diff: {e}"),
                     };
                     tx.send(AppEvent::DiffResult(text));
@@ -825,6 +1005,32 @@ impl ChatWidget {
             }
             SlashCommand::Mcp => {
                 self.add_mcp_output();
+            }
+            SlashCommand::InitTasks => {
+                match crate::tasks::init_tasks_file(&self.config.cwd) {
+                    Ok(path) => {
+                        self.add_to_history(history_cell::new_user_prompt(format!(
+                            "Initialized tasks file at {}",
+                            path.display()
+                        )));
+                        // Refresh prompt list to include empty (or future) tasks.
+                        self.submit_op(Op::ListCustomPrompts);
+                    }
+                    Err(e) => self.add_to_history(history_cell::new_error_event(format!(
+                        "/init-tasks failed: {e}"
+                    ))),
+                }
+            }
+            SlashCommand::ListTask => {
+                self.show_list_tasks();
+            }
+            SlashCommand::AddTask => {
+                // Insert the command into the composer so the user can type args.
+                self.insert_str("/add-task ");
+            }
+            SlashCommand::AddTaskFile => {
+                // Insert the command into the composer so the user can type args.
+                self.insert_str("/add-task-file ");
             }
             #[cfg(debug_assertions)]
             SlashCommand::TestApproval => {
@@ -864,6 +1070,7 @@ impl ChatWidget {
                     }),
                 }));
             }
+            _ => {}
         }
     }
 
@@ -1233,11 +1440,55 @@ impl ChatWidget {
         self.add_to_history(history_cell::new_mcp_tools_output(&self.config, ev.tools));
     }
 
+    fn show_list_tasks(&mut self) {
+        match crate::tasks::list_task_names(&self.config.cwd) {
+            Ok(names) => {
+                let body = if names.is_empty() {
+                    "(no tasks defined)".to_string()
+                } else {
+                    names.join("\n")
+                };
+                self.add_to_history(history_cell::new_user_prompt(body));
+            }
+            Err(e) => self.add_to_history(history_cell::new_error_event(format!(
+                "/list-task failed: {e}"
+            ))),
+        }
+    }
+
     fn on_list_custom_prompts(&mut self, ev: ListCustomPromptsResponseEvent) {
-        let len = ev.custom_prompts.len();
-        debug!("received {len} custom prompts");
-        // Forward to bottom pane so the slash popup can show them now.
-        self.bottom_pane.set_custom_prompts(ev.custom_prompts);
+        use codex_protocol::custom_prompts::CustomPrompt;
+        let cwd = self.config.cwd.clone();
+        // Start with prompts discovered by the core.
+        let mut merged: Vec<CustomPrompt> = ev.custom_prompts;
+        // Merge in YAML-backed tasks from `.codex/tasks.yaml` if present.
+        if let Ok(cfg) = crate::tasks::load_tasks(&cwd) {
+            use std::collections::HashSet;
+            let mut existing: HashSet<String> = merged.iter().map(|p| p.name.clone()).collect();
+            for t in cfg.tasks {
+                if existing.contains(&t.name) {
+                    continue;
+                }
+                let (content, path) = if let Some(rel) = t.prompt_file.as_ref() {
+                    let p = cwd.join(".codex").join(rel);
+                    match std::fs::read_to_string(&p) {
+                        Ok(s) => (s, p),
+                        Err(_) => (String::new(), p),
+                    }
+                } else {
+                    (t.prompt.join("\n"), crate::tasks::tasks_file_path(&cwd))
+                };
+                merged.push(CustomPrompt {
+                    name: t.name,
+                    path,
+                    content,
+                    description: t.description,
+                });
+            }
+        }
+        let len = merged.len();
+        debug!("received {len} custom prompts (including tasks.yaml)");
+        self.bottom_pane.set_custom_prompts(merged);
     }
 
     /// Programmatically submit a user text message as if typed in the

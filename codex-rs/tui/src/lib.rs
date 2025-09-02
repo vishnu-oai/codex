@@ -53,6 +53,7 @@ mod shimmer;
 mod slash_command;
 mod status_indicator_widget;
 mod streaming;
+mod tasks;
 mod text_formatting;
 mod tui;
 mod user_approval_widget;
@@ -222,7 +223,24 @@ pub async fn run_main(
             .map_err(|e| std::io::Error::other(format!("OSS setup failed: {e}")))?;
     }
 
-    let _ = tracing_subscriber::registry().with(file_layer).try_init();
+    // Build tracing subscriber: file layer + optional OpenTelemetry layer.
+    use tracing_subscriber::prelude::*;
+    // Initialize OTEL based on default file exporter into $CODEX_HOME/traces unless disabled.
+    let otel_settings = codex_telemetry::Settings {
+        enabled: true,
+        exporter: codex_telemetry::Exporter::OtlpFile { rotate_mb: None },
+        service_name: "codex-tui".to_string(),
+        service_version: env!("CARGO_PKG_VERSION").to_string(),
+        codex_home: Some(config.codex_home.clone()),
+    };
+    let otel_layer_opt = codex_telemetry::build_layer(&otel_settings).map(|(guard, tracer)| {
+        let _ = Box::leak(Box::new(guard));
+        tracing_opentelemetry::OpenTelemetryLayer::new(tracer)
+    });
+    let subscriber = tracing_subscriber::registry()
+        .with(file_layer)
+        .with(otel_layer_opt);
+    let _ = subscriber.try_init();
 
     run_ratatui_app(cli, config, should_show_trust_screen)
         .await

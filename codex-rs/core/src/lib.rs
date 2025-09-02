@@ -46,6 +46,8 @@ mod openai_tools;
 pub mod plan_tool;
 pub mod project_doc;
 mod rollout;
+// Telemetry initialization helpers are available but not exported to avoid API surface churn.
+// pub mod telemetry_init;
 pub(crate) mod safety;
 pub mod seatbelt;
 pub mod shell;
