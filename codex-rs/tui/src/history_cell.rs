@@ -718,6 +718,15 @@ pub(crate) fn new_status_output(
         sandbox_name.into(),
     ]));
 
+    // Shell timeout (from config summary entries)
+    let shell_timeout = lookup("shell timeout");
+    if !shell_timeout.is_empty() {
+        lines.push(Line::from(vec![
+            "  • Shell Timeout: ".into(),
+            shell_timeout.into(),
+        ]));
+    }
+
     // AGENTS.md files discovered via core's project_doc logic
     let agents_list = {
         match discover_project_doc_paths(config) {
