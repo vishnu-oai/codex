@@ -873,16 +873,21 @@ impl ChatWidget {
                                 });
 
                             if let Some(prompt_text) = task_prompt {
-                                // Build the combined text that the agent should receive.
-                                let combined = if args.is_empty() {
-                                    prompt_text
+                                // Wrap only the task prompt in user_instructions and append user's message separately.
+                                let instructions = format!(
+                                    "<user_instructions>\n\n{prompt_text}\n\n</user_instructions>"
+                                );
+                                let text = if args.is_empty() {
+                                    instructions
                                 } else {
-                                    format!("{prompt_text}\n\n{args}")
+                                    format!(
+                                        "{instructions}\n\n<user_message>\n\n{args}\n\n</user_message>"
+                                    )
                                 };
 
                                 // Send input (including any attached images) with the combined text.
                                 let mut items: Vec<InputItem> = Vec::new();
-                                items.push(InputItem::Text { text: combined });
+                                items.push(InputItem::Text { text });
                                 for path in self.bottom_pane.take_recent_submission_images() {
                                     items.push(InputItem::LocalImage { path });
                                 }
