@@ -70,6 +70,9 @@ pub(crate) struct ToolsConfig {
     pub apply_patch_tool_type: Option<ApplyPatchToolType>,
     pub web_search_request: bool,
     pub include_view_image_tool: bool,
+    /// Optional default shell timeout override in milliseconds.
+    /// None => use built-in default; Some(0) => unlimited.
+    pub default_shell_timeout_ms: Option<u64>,
 }
 
 pub(crate) struct ToolsConfigParams<'a> {
@@ -81,6 +84,7 @@ pub(crate) struct ToolsConfigParams<'a> {
     pub(crate) include_web_search_request: bool,
     pub(crate) use_streamable_shell_tool: bool,
     pub(crate) include_view_image_tool: bool,
+    pub(crate) default_shell_timeout_ms: Option<u64>,
 }
 
 impl ToolsConfig {
@@ -94,6 +98,7 @@ impl ToolsConfig {
             include_web_search_request,
             use_streamable_shell_tool,
             include_view_image_tool,
+            default_shell_timeout_ms,
         } = params;
         let mut shell_type = if *use_streamable_shell_tool {
             ConfigShellToolType::StreamableShell
@@ -126,6 +131,7 @@ impl ToolsConfig {
             apply_patch_tool_type,
             web_search_request: *include_web_search_request,
             include_view_image_tool: *include_view_image_tool,
+            default_shell_timeout_ms: *default_shell_timeout_ms,
         }
     }
 }

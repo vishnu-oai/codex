@@ -523,6 +523,7 @@ impl Session {
                 include_web_search_request: config.tools_web_search_request,
                 use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
                 include_view_image_tool: config.include_view_image_tool,
+                default_shell_timeout_ms: config.default_shell_timeout_ms,
             }),
             user_instructions,
             base_instructions,
@@ -1122,6 +1123,7 @@ async fn submission_loop(
                     include_web_search_request: config.tools_web_search_request,
                     use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
                     include_view_image_tool: config.include_view_image_tool,
+                    default_shell_timeout_ms: config.default_shell_timeout_ms,
                 });
 
                 let new_turn_context = TurnContext {
@@ -1208,6 +1210,7 @@ async fn submission_loop(
                             use_streamable_shell_tool: config
                                 .use_experimental_streamable_shell_tool,
                             include_view_image_tool: config.include_view_image_tool,
+                            default_shell_timeout_ms: config.default_shell_timeout_ms,
                         }),
                         user_instructions: turn_context.user_instructions.clone(),
                         base_instructions: turn_context.base_instructions.clone(),
@@ -2317,7 +2320,11 @@ fn to_exec_params(params: ShellToolCallParams, turn_context: &TurnContext) -> Ex
     ExecParams {
         command: params.command,
         cwd: turn_context.resolve_path(params.workdir.clone()),
-        timeout_ms: params.timeout_ms,
+        // Use per-call override if provided; otherwise fall back to configured default.
+        // A configured value of 0 means unlimited.
+        timeout_ms: params
+            .timeout_ms
+            .or(turn_context.tools_config.default_shell_timeout_ms),
         env: create_env(&turn_context.shell_environment_policy),
         with_escalated_permissions: params.with_escalated_permissions,
         justification: params.justification,
@@ -2623,13 +2630,15 @@ async fn handle_sandbox_error(
 
     // similarly, if the command timed out, we can simply return this failure to the model
     if matches!(error, SandboxErr::Timeout) {
+        let content = if let Some(ms) = params.effective_timeout_ms() {
+            format!("command timed out after {} milliseconds", ms)
+        } else {
+            "command timed out".to_string()
+        };
         return ResponseInputItem::FunctionCallOutput {
             call_id,
             output: FunctionCallOutputPayload {
-                content: format!(
-                    "command timed out after {} milliseconds",
-                    params.timeout_duration().as_millis()
-                ),
+                content,
                 success: Some(false),
             },
         };

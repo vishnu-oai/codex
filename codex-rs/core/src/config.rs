@@ -86,6 +86,11 @@ pub struct Config {
     /// Base instructions override.
     pub base_instructions: Option<String>,
 
+    /// Optional default shell timeout override (milliseconds).
+    /// When unset, the built-in default applies. When set to `0`, the shell
+    /// timeout is unlimited by default (tool-call `timeout_ms` still overrides).
+    pub default_shell_timeout_ms: Option<u64>,
+
     /// Optional external notifier command. When set, Codex will spawn this
     /// program after each completed *turn* (i.e. when the agent finishes
     /// processing a user submission). The value must be the full command
@@ -418,6 +423,10 @@ pub struct ConfigToml {
     /// context with every request). Currently necessary for OpenAI customers
     /// who have opted into Zero Data Retention (ZDR).
     pub disable_response_storage: Option<bool>,
+
+    /// Optional default shell timeout override (milliseconds).
+    /// When omitted, the built-in default is used. Set to `0` for unlimited.
+    pub shell_timeout_ms: Option<u64>,
 
     /// Optional external command to spawn for end-user notifications.
     #[serde(default)]
@@ -768,6 +777,9 @@ impl Config {
             notify: cfg.notify,
             user_instructions,
             base_instructions,
+            // Thread through the optional default shell timeout. None => use built-in default
+            // (currently 10_000ms). Some(0) => unlimited by default.
+            default_shell_timeout_ms: cfg.shell_timeout_ms,
             mcp_servers: cfg.mcp_servers,
             model_providers,
             project_doc_max_bytes: cfg.project_doc_max_bytes.unwrap_or(PROJECT_DOC_MAX_BYTES),
