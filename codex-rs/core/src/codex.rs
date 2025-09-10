@@ -2631,7 +2631,7 @@ async fn handle_sandbox_error(
     // similarly, if the command timed out, we can simply return this failure to the model
     if matches!(error, SandboxErr::Timeout) {
         let content = if let Some(ms) = params.effective_timeout_ms() {
-            format!("command timed out after {} milliseconds", ms)
+            format!("command timed out after {ms} milliseconds")
         } else {
             "command timed out".to_string()
         };

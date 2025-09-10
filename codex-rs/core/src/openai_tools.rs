@@ -646,6 +646,7 @@ mod tests {
             include_web_search_request: true,
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
+            default_shell_timeout_ms: None,
         });
         let tools = get_openai_tools(&config, Some(HashMap::new()));
 
@@ -667,6 +668,7 @@ mod tests {
             include_web_search_request: true,
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
+            default_shell_timeout_ms: None,
         });
         let tools = get_openai_tools(&config, Some(HashMap::new()));
 
@@ -688,6 +690,7 @@ mod tests {
             include_web_search_request: true,
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
+            default_shell_timeout_ms: None,
         });
         let tools = get_openai_tools(
             &config,
@@ -793,6 +796,7 @@ mod tests {
             include_web_search_request: false,
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
+            default_shell_timeout_ms: None,
         });
 
         // Intentionally construct a map with keys that would sort alphabetically.
@@ -870,6 +874,7 @@ mod tests {
             include_web_search_request: true,
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
+            default_shell_timeout_ms: None,
         });
 
         let tools = get_openai_tools(
@@ -932,6 +937,7 @@ mod tests {
             include_web_search_request: true,
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
+            default_shell_timeout_ms: None,
         });
 
         let tools = get_openai_tools(
@@ -989,6 +995,7 @@ mod tests {
             include_web_search_request: true,
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
+            default_shell_timeout_ms: None,
         });
 
         let tools = get_openai_tools(
@@ -1046,6 +1053,7 @@ mod tests {
             include_web_search_request: true,
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
+            default_shell_timeout_ms: None,
         });
 
         let tools = get_openai_tools(

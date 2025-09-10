@@ -29,7 +29,7 @@ pub fn create_config_summary_entries(config: &Config) -> Vec<(&'static str, Stri
     let shell_timeout_value = match config.default_shell_timeout_ms {
         None => "default".to_string(),
         Some(0) => "unlimited".to_string(),
-        Some(ms) => format!("{} ms", ms),
+        Some(ms) => format!("{ms} ms"),
     };
     entries.push(("shell timeout", shell_timeout_value));
 
