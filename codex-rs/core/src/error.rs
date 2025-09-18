@@ -29,8 +29,8 @@ pub enum SandboxErr {
     Timeout,
 
     /// Command was killed by a signal
-    #[error("command was killed by a signal")]
-    Signal(i32),
+    #[error("command terminated by signal {0}, stdout: {1}, stderr: {2}")]
+    Signal(i32, String, String),
 
     /// Error from linux landlock
     #[error("Landlock was not able to fully enforce all sandbox rules")]

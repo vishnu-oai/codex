@@ -157,7 +157,12 @@ pub async fn process_exec_tool_call(
             match raw_output.exit_status.signal() {
                 Some(TIMEOUT_CODE) => return Err(CodexErr::Sandbox(SandboxErr::Timeout)),
                 Some(signal) => {
-                    return Err(CodexErr::Sandbox(SandboxErr::Signal(signal)));
+                    // Include captured stdout/stderr so users can see assertion/crash messages.
+                    return Err(CodexErr::Sandbox(SandboxErr::Signal(
+                        signal,
+                        stdout.text.clone(),
+                        stderr.text.clone(),
+                    )));
                 }
                 None => {}
             }
