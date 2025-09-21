@@ -3,6 +3,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use codex_protocol::mcp_protocol::GitSha;
+use codex_protocol::protocol::GitInfo;
 use futures::future::join_all;
 use serde::Deserialize;
 use serde::Serialize;
@@ -10,23 +11,38 @@ use tokio::process::Command;
 use tokio::time::Duration as TokioDuration;
 use tokio::time::timeout;
 
-use crate::util::is_inside_git_repo;
+/// Return `true` if the project folder specified by the `Config` is inside a
+/// Git repository.
+///
+/// The check walks up the directory hierarchy looking for a `.git` file or
+/// directory (note `.git` can be a file that contains a `gitdir` entry). This
+/// approach does **not** require the `git` binary or the `git2` crate and is
+/// therefore fairly lightweight.
+///
+/// Note that this does **not** detect *work‑trees* created with
+/// `git worktree add` where the checkout lives outside the main repository
+/// directory. If you need Codex to work from such a checkout simply pass the
+/// `--allow-no-git-exec` CLI flag that disables the repo requirement.
+pub fn get_git_repo_root(base_dir: &Path) -> Option<PathBuf> {
+    let mut dir = base_dir.to_path_buf();
+
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir);
+        }
+
+        // Pop one component (go up one directory).  `pop` returns false when
+        // we have reached the filesystem root.
+        if !dir.pop() {
+            break;
+        }
+    }
+
+    None
+}
 
 /// Timeout for git commands to prevent freezing on large repositories
 const GIT_COMMAND_TIMEOUT: TokioDuration = TokioDuration::from_secs(5);
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct GitInfo {
-    /// Current commit hash (SHA)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub commit_hash: Option<String>,
-    /// Current branch name
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-    /// Repository URL (if available from remote)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repository_url: Option<String>,
-}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GitDiffToRemote {
@@ -94,9 +110,7 @@ pub async fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
 
 /// Returns the closest git sha to HEAD that is on a remote as well as the diff to that sha.
 pub async fn git_diff_to_remote(cwd: &Path) -> Option<GitDiffToRemote> {
-    if !is_inside_git_repo(cwd) {
-        return None;
-    }
+    get_git_repo_root(cwd)?;
 
     let remotes = get_git_remotes(cwd).await?;
     let branches = branch_ancestry(cwd).await?;
@@ -440,7 +454,7 @@ async fn diff_against_sha(cwd: &Path, sha: &GitSha) -> Option<String> {
 }
 
 /// Resolve the path that should be used for trust checks. Similar to
-/// `[utils::is_inside_git_repo]`, but resolves to the root of the main
+/// `[get_git_repo_root]`, but resolves to the root of the main
 /// repository. Handles worktrees.
 pub fn resolve_root_git_project_for_trust(cwd: &Path) -> Option<PathBuf> {
     let base = if cwd.is_dir() { cwd } else { cwd.parent()? };
@@ -788,7 +802,7 @@ mod tests {
     async fn resolve_root_git_project_for_trust_regular_repo_returns_repo_root() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let repo_path = create_test_git_repo(&temp_dir).await;
-        let expected = std::fs::canonicalize(&repo_path).unwrap().to_path_buf();
+        let expected = std::fs::canonicalize(&repo_path).unwrap();
 
         assert_eq!(
             resolve_root_git_project_for_trust(&repo_path),
@@ -796,10 +810,7 @@ mod tests {
         );
         let nested = repo_path.join("sub/dir");
         std::fs::create_dir_all(&nested).unwrap();
-        assert_eq!(
-            resolve_root_git_project_for_trust(&nested),
-            Some(expected.clone())
-        );
+        assert_eq!(resolve_root_git_project_for_trust(&nested), Some(expected));
     }
 
     #[tokio::test]

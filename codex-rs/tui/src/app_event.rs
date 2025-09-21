@@ -1,7 +1,6 @@
-use codex_core::protocol::ConversationHistoryResponseEvent;
+use codex_core::protocol::ConversationPathResponseEvent;
 use codex_core::protocol::Event;
 use codex_file_search::FileMatch;
-use ratatui::text::Line;
 
 use crate::history_cell::HistoryCell;
 
@@ -40,7 +39,6 @@ pub(crate) enum AppEvent {
     /// Result of computing a `/diff` command.
     DiffResult(String),
 
-    InsertHistoryLines(Vec<Line<'static>>),
     InsertHistoryCell(Box<dyn HistoryCell>),
 
     StartCommitAnimation,
@@ -48,10 +46,16 @@ pub(crate) enum AppEvent {
     CommitTick,
 
     /// Update the current reasoning effort in the running app and widget.
-    UpdateReasoningEffort(ReasoningEffort),
+    UpdateReasoningEffort(Option<ReasoningEffort>),
 
     /// Update the current model slug in the running app and widget.
     UpdateModel(String),
+
+    /// Persist the selected model and reasoning effort to the appropriate config.
+    PersistModelSelection {
+        model: String,
+        effort: Option<ReasoningEffort>,
+    },
 
     /// Update the current approval policy in the running app and widget.
     UpdateAskForApprovalPolicy(AskForApproval),
@@ -60,5 +64,5 @@ pub(crate) enum AppEvent {
     UpdateSandboxPolicy(SandboxPolicy),
 
     /// Forwarded conversation history snapshot from the current conversation.
-    ConversationHistory(ConversationHistoryResponseEvent),
+    ConversationHistory(ConversationPathResponseEvent),
 }

@@ -92,10 +92,37 @@ impl CommandPopup {
             .ensure_visible(matches_len, MAX_POPUP_ROWS.min(matches_len));
     }
 
-    /// Determine the preferred height of the popup. This is the number of
-    /// rows required to show at most MAX_POPUP_ROWS commands.
-    pub(crate) fn calculate_required_height(&self) -> u16 {
-        self.filtered_items().len().clamp(1, MAX_POPUP_ROWS) as u16
+    /// Determine the preferred height of the popup for a given width.
+    /// Accounts for wrapped descriptions so that long tooltips don't overflow.
+    pub(crate) fn calculate_required_height(&self, width: u16) -> u16 {
+        use super::selection_popup_common::GenericDisplayRow;
+        use super::selection_popup_common::measure_rows_height;
+        let matches = self.filtered();
+        let rows_all: Vec<GenericDisplayRow> = if matches.is_empty() {
+            Vec::new()
+        } else {
+            matches
+                .into_iter()
+                .map(|(item, indices, _)| match item {
+                    CommandItem::Builtin(cmd) => GenericDisplayRow {
+                        name: format!("/{}", cmd.command()),
+                        match_indices: indices.map(|v| v.into_iter().map(|i| i + 1).collect()),
+                        is_current: false,
+                        description: Some(cmd.description().to_string()),
+                        is_custom: false,
+                    },
+                    CommandItem::UserPrompt(i) => GenericDisplayRow {
+                        name: format!("/{}", self.prompts[i].name),
+                        match_indices: indices.map(|v| v.into_iter().map(|i| i + 1).collect()),
+                        is_current: false,
+                        description: Some("send saved prompt".to_string()),
+                        is_custom: true,
+                    },
+                })
+                .collect()
+        };
+
+        measure_rows_height(&rows_all, &self.state, MAX_POPUP_ROWS, width)
     }
 
     /// Compute fuzzy-filtered matches over built-in commands and user prompts,
@@ -197,7 +224,15 @@ impl WidgetRef for CommandPopup {
                 })
                 .collect()
         };
-        render_rows(area, buf, &rows_all, &self.state, MAX_POPUP_ROWS, false);
+        render_rows(
+            area,
+            buf,
+            &rows_all,
+            &self.state,
+            MAX_POPUP_ROWS,
+            false,
+            "no matches",
+        );
     }
 }
 
@@ -237,6 +272,20 @@ mod tests {
             Some(CommandItem::Builtin(cmd)) => assert_eq!(cmd.command(), "init"),
             Some(CommandItem::UserPrompt(_)) => panic!("unexpected prompt selected for '/init'"),
             None => panic!("expected a selected command for exact match"),
+        }
+    }
+
+    #[test]
+    fn model_is_first_suggestion_for_mo() {
+        let mut popup = CommandPopup::new(Vec::new());
+        popup.on_composer_text_change("/mo".to_string());
+        let matches = popup.filtered_items();
+        match matches.first() {
+            Some(CommandItem::Builtin(cmd)) => assert_eq!(cmd.command(), "model"),
+            Some(CommandItem::UserPrompt(_)) => {
+                panic!("unexpected prompt ranked before '/model' for '/mo'")
+            }
+            None => panic!("expected at least one match for '/mo'"),
         }
     }
 
