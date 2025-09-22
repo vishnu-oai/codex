@@ -6,6 +6,9 @@ use crate::config_types::ReasoningSummaryFormat;
 use crate::config_types::SandboxWorkspaceWrite;
 use crate::config_types::ShellEnvironmentPolicy;
 use crate::config_types::ShellEnvironmentPolicyToml;
+use crate::config_types::TelemetryConfig;
+use crate::config_types::TelemetryConfigToml;
+use crate::config_types::TelemetryExporterKind;
 use crate::config_types::Tui;
 use crate::config_types::UriBasedFileOpener;
 use crate::git_info::resolve_root_git_project_for_trust;
@@ -14,9 +17,6 @@ use crate::model_family::derive_default_model_family;
 use crate::model_family::find_family_for_model;
 use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::built_in_model_providers;
-use crate::config_types::TelemetryConfig;
-use crate::config_types::TelemetryConfigToml;
-use crate::config_types::TelemetryExporterKind;
 use crate::openai_model_info::get_model_info;
 use crate::protocol::AskForApproval;
 use crate::protocol::SandboxPolicy;
@@ -1656,6 +1656,13 @@ model_verbosity = "high"
                 disable_paste_burst: false,
                 default_shell_timeout_ms: None,
                 tui_notifications: Default::default(),
+                telemetry: TelemetryConfig {
+                    enabled: true,
+                    exporter: TelemetryExporterKind::OtlpFile,
+                    endpoint: None,
+                    headers: Default::default(),
+                    rotate_mb: None,
+                },
             },
             o3_profile_config
         );
@@ -1715,6 +1722,13 @@ model_verbosity = "high"
             disable_paste_burst: false,
             default_shell_timeout_ms: None,
             tui_notifications: Default::default(),
+            telemetry: TelemetryConfig {
+                enabled: true,
+                exporter: TelemetryExporterKind::OtlpFile,
+                endpoint: None,
+                headers: Default::default(),
+                rotate_mb: None,
+            },
         };
 
         assert_eq!(expected_gpt3_profile_config, gpt3_profile_config);
@@ -1789,6 +1803,13 @@ model_verbosity = "high"
             disable_paste_burst: false,
             default_shell_timeout_ms: None,
             tui_notifications: Default::default(),
+            telemetry: TelemetryConfig {
+                enabled: true,
+                exporter: TelemetryExporterKind::OtlpFile,
+                endpoint: None,
+                headers: Default::default(),
+                rotate_mb: None,
+            },
         };
 
         assert_eq!(expected_zdr_profile_config, zdr_profile_config);
@@ -1848,6 +1869,14 @@ model_verbosity = "high"
             active_profile: Some("gpt5".to_string()),
             disable_paste_burst: false,
             tui_notifications: Default::default(),
+            default_shell_timeout_ms: None,
+            telemetry: TelemetryConfig {
+                enabled: true,
+                exporter: TelemetryExporterKind::OtlpFile,
+                endpoint: None,
+                headers: Default::default(),
+                rotate_mb: None,
+            },
         };
 
         assert_eq!(expected_gpt5_profile_config, gpt5_profile_config);

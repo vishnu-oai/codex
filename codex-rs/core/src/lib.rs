@@ -26,6 +26,7 @@ pub mod error;
 pub mod exec;
 mod exec_command;
 pub mod exec_env;
+mod exec_whitelist;
 mod flags;
 pub mod git_info;
 pub mod internal_storage;

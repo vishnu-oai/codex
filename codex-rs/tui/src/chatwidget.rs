@@ -991,9 +991,7 @@ impl ChatWidget {
                                     format!("/{name} {args}")
                                 };
                                 self.codex_op_tx
-                                    .send(Op::AddToHistory {
-                                        text: display.clone(),
-                                    })
+                                    .send(Op::AddToHistory { text: display })
                                     .unwrap_or_else(|e| {
                                         tracing::error!("failed to send AddHistory op: {e}")
                                     });

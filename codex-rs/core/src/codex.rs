@@ -68,6 +68,7 @@ use crate::exec_command::ExecSessionManager;
 use crate::exec_command::WRITE_STDIN_TOOL_NAME;
 use crate::exec_command::WriteStdinParams;
 use crate::exec_env::create_env;
+use crate::exec_whitelist::ExecWhitelistToml;
 use crate::mcp_connection_manager::McpConnectionManager;
 use crate::mcp_tool_call::handle_mcp_tool_call;
 use crate::model_family::find_family_for_model;
@@ -298,6 +299,7 @@ pub(crate) struct Session {
     codex_linux_sandbox_exe: Option<PathBuf>,
     user_shell: shell::Shell,
     show_raw_agent_reasoning: bool,
+    repo_exec_whitelist: ExecWhitelistToml,
 }
 
 /// The context needed for a single turn of the conversation.
@@ -467,6 +469,10 @@ impl Session {
             model_reasoning_summary,
             conversation_id,
         );
+        // Resolve repo root for whitelist loading (handles worktrees); fall back to cwd.
+        let repo_root = crate::git_info::resolve_root_git_project_for_trust(&cwd)
+            .unwrap_or_else(|| cwd.clone());
+
         let turn_context = TurnContext {
             client,
             tools_config: ToolsConfig::new(&ToolsConfigParams {
@@ -501,6 +507,7 @@ impl Session {
             codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
             user_shell: default_shell,
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+            repo_exec_whitelist: ExecWhitelistToml::load_from_repo_root(&repo_root),
         });
 
         // Dispatch the SessionConfiguredEvent first and then report any errors.
@@ -2798,13 +2805,19 @@ async fn handle_container_exec_with_params(
         None => {
             let safety = {
                 let state = sess.state.lock_unchecked();
-                assess_command_safety(
-                    &params.command,
-                    turn_context.approval_policy,
-                    &turn_context.sandbox_policy,
-                    &state.approved_commands,
-                    params.with_escalated_permissions.unwrap_or(false),
-                )
+                if sess.repo_exec_whitelist.matches(&params.command) {
+                    SafetyCheck::AutoApprove {
+                        sandbox_type: SandboxType::None,
+                    }
+                } else {
+                    assess_command_safety(
+                        &params.command,
+                        turn_context.approval_policy,
+                        &turn_context.sandbox_policy,
+                        &state.approved_commands,
+                        params.with_escalated_permissions.unwrap_or(false),
+                    )
+                }
             };
             let command_for_display = params.command.clone();
             (params, safety, command_for_display)
@@ -3620,6 +3633,7 @@ mod tests {
             codex_linux_sandbox_exe: None,
             user_shell: shell::Shell::Unknown,
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+            repo_exec_whitelist: ExecWhitelistToml::default(),
         };
         (session, turn_context)
     }

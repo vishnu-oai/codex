@@ -164,8 +164,8 @@ pub async fn process_exec_tool_call(
                     } else {
                         return Err(CodexErr::Sandbox(SandboxErr::Signal(
                             signal,
-                            stdout.text.clone(),
-                            stderr.text.clone(),
+                            stdout.text,
+                            stderr.text,
                         )));
                     }
                 }

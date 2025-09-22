@@ -336,6 +336,37 @@ Codex provides three main Approval Presets:
 
 You can further customize how Codex runs at the command line using the `--ask-for-approval` and `--sandbox` options.
 
+### Repo exec whitelist (`.codex/exec_whitelist.toml`)
+
+You can whitelist specific commands so they run without prompting for approval. This is useful for operations outside the workspace (e.g. package managers) that you routinely allow.
+
+Create `.codex/exec_whitelist.toml` in your repository root:
+
+```toml
+[[whitelist]]
+# Auto-approve any command whose argv starts with this prefix
+prefix = ["brew", "install"]
+
+[[whitelist]]
+prefix = ["aws", "s3", "cp"]
+
+[[whitelist]]
+prefix = ["docker", "pull"]
+
+# Use regex-based token prefixes (match start of command by regex per-token)
+[[whitelist]]
+regex_tokens = ["^pip$", "^(install|upgrade)$"]
+```
+
+Rules match by argv prefix. For example, `prefix = ["brew", "install"]` matches `brew install ripgrep`.
+
+Regex tokens match each token with a regular expression. Example above matches `pip install …` and `pip upgrade …`.
+
+Notes:
+- Whitelisted commands are treated as trusted and will run without a sandbox.
+- The whitelist file is optional; if absent, no extra auto-approvals are applied.
+- Changes take effect the next time a session starts.
+
 ## mcp_servers
 
 Defines the list of MCP servers that Codex can consult for tool use. Currently, only servers that are launched by executing a program that communicate over stdio are supported. For servers that use the SSE transport, consider an adapter like [mcp-proxy](https://github.com/sparfenyuk/mcp-proxy).

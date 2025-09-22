@@ -883,7 +883,6 @@ mod tests {
             include_view_image_tool: true,
             experimental_unified_exec_tool: true,
             default_shell_timeout_ms: None,
-            experimental_unified_exec_tool: true,
         });
 
         let tools = get_openai_tools(

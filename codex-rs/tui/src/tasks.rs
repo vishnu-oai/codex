@@ -111,15 +111,15 @@ pub fn add_or_update_task_file(
     let rel_str = rel.to_string_lossy().to_string();
     if let Some(existing) = cfg.tasks.iter_mut().find(|t| t.name == name) {
         existing.prompt.clear();
-        existing.prompt_file = Some(rel_str.clone());
-        if description.is_some() {
-            existing.description = description.clone();
+        existing.prompt_file = Some(rel_str);
+        if let Some(desc) = description {
+            existing.description = Some(desc);
         }
     } else {
         cfg.tasks.push(Task {
             name: name.to_string(),
             prompt: Vec::new(),
-            prompt_file: Some(rel_str.clone()),
+            prompt_file: Some(rel_str),
             description,
         });
     }
