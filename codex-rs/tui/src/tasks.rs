@@ -18,6 +18,8 @@ pub struct Task {
     pub prompt: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 pub fn tasks_file_path(cwd: &Path) -> PathBuf {
@@ -56,17 +58,24 @@ pub fn save_tasks(cwd: &Path, cfg: &TaskConfig) -> Result<()> {
     Ok(())
 }
 
-pub fn add_or_update_task(cwd: &Path, name: &str, prompt: String) -> Result<()> {
+pub fn add_or_update_task(
+    cwd: &Path,
+    name: &str,
+    prompt: String,
+    description: Option<String>,
+) -> Result<()> {
     let mut cfg = load_tasks(cwd)?;
     let prompt_lines: Vec<String> = prompt.lines().map(|s| s.to_string()).collect();
     if let Some(existing) = cfg.tasks.iter_mut().find(|t| t.name == name) {
         existing.prompt = prompt_lines;
         existing.prompt_file = None;
+        existing.description = description;
     } else {
         cfg.tasks.push(Task {
             name: name.to_string(),
             prompt: prompt_lines,
             prompt_file: None,
+            description,
         });
     }
     save_tasks(cwd, &cfg)
@@ -74,7 +83,12 @@ pub fn add_or_update_task(cwd: &Path, name: &str, prompt: String) -> Result<()> 
 
 /// Add or update a task to reference a prompt file stored under `.codex/`.
 /// If the file does not exist, it will be created (empty).
-pub fn add_or_update_task_file(cwd: &Path, name: &str, rel_path: &str) -> Result<PathBuf> {
+pub fn add_or_update_task_file(
+    cwd: &Path,
+    name: &str,
+    rel_path: &str,
+    description: Option<String>,
+) -> Result<PathBuf> {
     let mut cfg = load_tasks(cwd)?;
     let codex_dir = cwd.join(".codex");
     fs::create_dir_all(&codex_dir)
@@ -97,12 +111,16 @@ pub fn add_or_update_task_file(cwd: &Path, name: &str, rel_path: &str) -> Result
     let rel_str = rel.to_string_lossy().to_string();
     if let Some(existing) = cfg.tasks.iter_mut().find(|t| t.name == name) {
         existing.prompt.clear();
-        existing.prompt_file = Some(rel_str.clone());
+        existing.prompt_file = Some(rel_str);
+        if let Some(desc) = description {
+            existing.description = Some(desc);
+        }
     } else {
         cfg.tasks.push(Task {
             name: name.to_string(),
             prompt: Vec::new(),
-            prompt_file: Some(rel_str.clone()),
+            prompt_file: Some(rel_str),
+            description,
         });
     }
     save_tasks(cwd, &cfg)?;
