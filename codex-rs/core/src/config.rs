@@ -223,8 +223,29 @@ impl Config {
         // `Config` instance.
         let codex_home = find_codex_home()?;
 
-        // Step 1: parse `config.toml` into a generic JSON value.
+        // Step 1: parse `config.toml` into a generic TOML value.
         let mut root_value = load_config_as_toml(&codex_home)?;
+
+        // Step 1.1: merge in repo-local overrides from `<cwd>/.codex/config-overrides.toml`
+        // when present. If `overrides.cwd` is provided, resolve it similarly to
+        // how we resolve cwd below; otherwise, use the process current dir.
+        let repo_dir = {
+            use std::env;
+            if let Some(p) = overrides.cwd.as_ref() {
+                if p.is_absolute() {
+                    p.clone()
+                } else {
+                    let mut current = env::current_dir()?;
+                    current.push(p);
+                    current
+                }
+            } else {
+                env::current_dir()?
+            }
+        };
+        if let Ok(project_overrides) = load_project_overrides_as_toml(&repo_dir) {
+            merge_toml_values(&mut root_value, &project_overrides);
+        }
 
         // Step 2: apply the `-c` overrides.
         for (path, value) in cli_overrides.into_iter() {
@@ -248,6 +269,13 @@ pub fn load_config_as_toml_with_cli_overrides(
     cli_overrides: Vec<(String, TomlValue)>,
 ) -> std::io::Result<ConfigToml> {
     let mut root_value = load_config_as_toml(codex_home)?;
+
+    // Merge in repo-local overrides from the current working directory.
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(project_overrides) = load_project_overrides_as_toml(&cwd) {
+            merge_toml_values(&mut root_value, &project_overrides);
+        }
+    }
 
     for (path, value) in cli_overrides.into_iter() {
         apply_toml_override(&mut root_value, &path, value);
@@ -280,6 +308,51 @@ pub fn load_config_as_toml(codex_home: &Path) -> std::io::Result<TomlValue> {
         Err(e) => {
             tracing::error!("Failed to read config.toml: {e}");
             Err(e)
+        }
+    }
+}
+
+/// Read `<project_root>/.codex/config-overrides.toml` if present and return it as a TOML value.
+/// Returns an empty TOML table when the file does not exist.
+fn load_project_overrides_as_toml(project_root: &Path) -> std::io::Result<TomlValue> {
+    let overrides_path = project_root.join(".codex").join("config-overrides.toml");
+    match std::fs::read_to_string(&overrides_path) {
+        Ok(contents) => match toml::from_str::<TomlValue>(&contents) {
+            Ok(val) => Ok(val),
+            Err(e) => {
+                tracing::error!(
+                    "Failed to parse config-overrides.toml ({}): {e}",
+                    overrides_path.display()
+                );
+                Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(TomlValue::Table(Default::default()))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Recursively deep-merge `src` into `dst`.
+/// - Tables are merged key-by-key (recursively).
+/// - Arrays and scalars are replaced entirely by `src`.
+fn merge_toml_values(dst: &mut TomlValue, src: &TomlValue) {
+    use toml::value::Table;
+
+    match (dst, src) {
+        (TomlValue::Table(dst_tbl), TomlValue::Table(src_tbl)) => {
+            for (k, v) in src_tbl.iter() {
+                match dst_tbl.get_mut(k) {
+                    Some(dst_child) => merge_toml_values(dst_child, v),
+                    None => {
+                        dst_tbl.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        (d, s) => {
+            *d = s.clone();
         }
     }
 }

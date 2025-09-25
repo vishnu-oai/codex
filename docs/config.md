@@ -221,9 +221,29 @@ approval_policy = "on-failure"
 Users can specify config values at multiple levels. Order of precedence is as follows:
 
 1. custom command-line argument, e.g., `--model o3`
-2. as part of a profile, where the `--profile` is specified via a CLI (or in the config file itself)
-3. as an entry in `config.toml`, e.g., `model = "o3"`
-4. the default value that comes with Codex CLI (i.e., Codex CLI defaults to `gpt-5`)
+2. active profile selection (via `--profile` or `profile = "..."` in config)
+3. project-level overrides in `./.codex/config-overrides.toml` (merged on top of Codex home config)
+4. entries in `$CODEX_HOME/config.toml` (defaults to `~/.codex/config.toml`)
+5. the default value that comes with Codex CLI (i.e., Codex CLI defaults to `gpt-5`)
+
+## Project-level overrides (`.codex/config-overrides.toml`)
+
+You can keep repo-specific overrides in your project directory without changing your global Codex home config. Create `./.codex/config-overrides.toml` in your repository root. It has the same schema as `config.toml` and is merged on top of `$CODEX_HOME/config.toml` before CLI overrides are applied.
+
+Example:
+
+```toml
+# ./.codex/config-overrides.toml
+model = "o3"
+
+[mcp_servers.docs]
+command = "npx"
+args = ["-y", "mcp-proxy", "http://localhost:4000/sse"]
+```
+
+Notes:
+- The file is looked up relative to the working directory where you launch Codex.
+- If you pass a `--cwd` (or use a profile that sets `cwd`), the overrides are resolved against that directory as well.
 
 ## model_reasoning_effort
 
