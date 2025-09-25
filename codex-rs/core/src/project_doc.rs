@@ -17,8 +17,8 @@ use std::path::PathBuf;
 use tokio::io::AsyncReadExt;
 use tracing::error;
 
-/// Currently, we only match the filename `AGENTS.md` exactly.
-const CANDIDATE_FILENAMES: &[&str] = &["AGENTS.md"];
+/// Currently, we only match the filename `FM-AGENTS.md` exactly.
+const CANDIDATE_FILENAMES: &[&str] = &["FM-AGENTS.md"];
 
 /// When both `Config::instructions` and the project doc are present, they will
 /// be concatenated with the following separator.

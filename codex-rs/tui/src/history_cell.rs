@@ -674,7 +674,7 @@ pub(crate) fn new_session_info(
             Line::from(vec![
                 "  ".into(),
                 "/init".into(),
-                " - create an AGENTS.md file with instructions for Codex".dim(),
+                " - create an FM-AGENTS.md file with instructions for Codex".dim(),
             ]),
             Line::from(vec![
                 "  ".into(),
@@ -1126,7 +1126,7 @@ pub(crate) fn new_status_output(
         ]));
     }
 
-    // AGENTS.md files discovered via core's project_doc logic
+    // FM-AGENTS.md files discovered via core's project_doc logic
     let agents_list = {
         match discover_project_doc_paths(config) {
             Ok(paths) => {
@@ -1134,7 +1134,7 @@ pub(crate) fn new_status_output(
                 for p in paths {
                     let display = if let Some(parent) = p.parent() {
                         if parent == config.cwd {
-                            "AGENTS.md".to_string()
+                            "FM-AGENTS.md".to_string()
                         } else {
                             let mut cur = config.cwd.as_path();
                             let mut ups = 0usize;
@@ -1149,7 +1149,7 @@ pub(crate) fn new_status_output(
                             }
                             if reached {
                                 let up = format!("..{}", std::path::MAIN_SEPARATOR);
-                                format!("{}AGENTS.md", up.repeat(ups))
+                                format!("{}FM-AGENTS.md", up.repeat(ups))
                             } else if let Ok(stripped) = p.strip_prefix(&config.cwd) {
                                 stripped.display().to_string()
                             } else {
