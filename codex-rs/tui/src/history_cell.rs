@@ -192,7 +192,7 @@ impl HistoryCell for AgentMessageCell {
     fn transcript_lines(&self) -> Vec<Line<'static>> {
         let mut out: Vec<Line<'static>> = Vec::new();
         if self.is_first_line {
-            out.push("codex".magenta().bold().into());
+            out.push("fm-codex".magenta().bold().into());
         }
         out.extend(self.lines.clone());
         out
@@ -831,15 +831,15 @@ impl HistoryCell for SessionHeaderHistoryCell {
         top.push('╮');
         out.push(Line::from(top.dim()));
 
-        // Title line rendered inside the box: " >_ OpenAI Codex (vX)"
-        let title_text = format!(" >_ OpenAI Codex (v{})", self.version);
+        // Title line rendered inside the box: " >_ FastModels Codex (vX)"
+        let title_text = format!(" >_ FastModels Codex (v{})", self.version);
         let title_w = UnicodeWidthStr::width(title_text.as_str());
         let pad_w = inner_width.saturating_sub(title_w);
         let mut title_spans: Vec<Span<'static>> = vec![
             Span::from("│").dim(),
             Span::from(" ").dim(),
             Span::from(">_ ").dim(),
-            Span::from("OpenAI Codex").bold(),
+            Span::from("FastModels Codex").bold(),
             Span::from(" ").dim(),
             Span::from(format!("(v{})", self.version)).dim(),
         ];
