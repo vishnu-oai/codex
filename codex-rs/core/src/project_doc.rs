@@ -178,7 +178,8 @@ pub fn discover_project_doc_paths(config: &Config) -> std::io::Result<Vec<PathBu
 
 fn candidate_filenames<'a>(config: &'a Config) -> Vec<&'a str> {
     // Start with AGENTS.md.
-    let mut names: Vec<&'a str> = Vec::with_capacity(2 + config.project_doc_fallback_filenames.len());
+    let mut names: Vec<&'a str> =
+        Vec::with_capacity(2 + config.project_doc_fallback_filenames.len());
     names.push(DEFAULT_PROJECT_DOC_FILENAME);
 
     // Include any configured fallbacks from the config.
