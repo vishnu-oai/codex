@@ -1,7 +1,7 @@
 mod cli;
 mod event_processor;
 mod event_processor_with_human_output;
-mod event_processor_with_json_output;
+mod event_processor_with_jsonl_output;
 
 use std::io::IsTerminal;
 use std::io::Read;
@@ -24,7 +24,7 @@ use codex_core::protocol::TaskCompleteEvent;
 use codex_core::util::is_inside_git_repo;
 use codex_ollama::DEFAULT_OSS_MODEL;
 use event_processor_with_human_output::EventProcessorWithHumanOutput;
-use event_processor_with_json_output::EventProcessorWithJsonOutput;
+use event_processor_with_jsonl_output::EventProcessorWithJsonOutput;
 use tracing::debug;
 use tracing::error;
 use tracing::info;

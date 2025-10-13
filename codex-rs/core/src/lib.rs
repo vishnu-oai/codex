@@ -29,7 +29,6 @@ pub mod exec_env;
 mod exec_whitelist;
 mod flags;
 pub mod git_info;
-pub mod internal_storage;
 mod is_safe_command;
 pub mod landlock;
 mod mcp_connection_manager;

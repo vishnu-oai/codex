@@ -34,7 +34,7 @@ codex-core = { path = "../core" }
 codex-file-search = { path = "../file-search" }
 codex-login = { path = "../login" }
 codex-ollama = { path = "../ollama" }
-codex-telemetry = { path = "../codex-telemetry", features = ["otel"] }
+codex-otel = { path = "../otel" }
 color-eyre = "0.6.3"
 crossterm = { version = "0.28.1", features = ["bracketed-paste"] }
 diffy = "0.4.2"
