@@ -25,10 +25,6 @@ pub enum SlashCommand {
     Mcp,
     Logout,
     Quit,
-    InitTasks,
-    AddTask,
-    ListTask,
-    AddTaskFile,
     #[cfg(debug_assertions)]
     TestApproval,
 }
@@ -38,7 +34,7 @@ impl SlashCommand {
     pub fn description(self) -> &'static str {
         match self {
             SlashCommand::New => "start a new chat during a conversation",
-            SlashCommand::Init => "create an FM-AGENTS.md file with instructions for Codex",
+            SlashCommand::Init => "create an AGENTS.md file with instructions for Codex",
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
             SlashCommand::Review => "review my current changes and find issues",
             SlashCommand::Undo => "restore the workspace to the last Codex snapshot",
@@ -50,10 +46,6 @@ impl SlashCommand {
             SlashCommand::Approvals => "choose what Codex can do without approval",
             SlashCommand::Mcp => "list configured MCP tools",
             SlashCommand::Logout => "log out of Codex",
-            SlashCommand::InitTasks => "initialize or reset custom tasks file",
-            SlashCommand::AddTask => "add a custom task: /add-task <name> \"prompt\"",
-            SlashCommand::ListTask => "list configured custom tasks",
-            SlashCommand::AddTaskFile => "link a task to a file: /add-task-file <name> <file>",
             #[cfg(debug_assertions)]
             SlashCommand::TestApproval => "test approval request",
         }

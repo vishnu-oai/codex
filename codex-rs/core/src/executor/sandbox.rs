@@ -106,6 +106,7 @@ async fn select_shell_sandbox(
         &config.sandbox_policy,
         &approved_snapshot,
         request.params.with_escalated_permissions.unwrap_or(false),
+        &config.sandbox_cwd,
     );
 
     match safety {

@@ -132,7 +132,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
         const VERSION: &str = env!("CARGO_PKG_VERSION");
         ts_msg!(
             self,
-            "FastModels Codex v{} (research preview)\n--------",
+            "OpenAI Codex v{} (research preview)\n--------",
             VERSION
         );
 

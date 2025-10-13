@@ -7,6 +7,7 @@ use codex_apply_patch::ApplyPatchAction;
 use codex_apply_patch::ApplyPatchFileChange;
 
 use crate::exec::SandboxType;
+use crate::exec_whitelist::ExecWhitelistToml;
 
 use crate::command_safety::is_dangerous_command::command_might_be_dangerous;
 use crate::command_safety::is_safe_command::is_known_safe_command;
@@ -95,6 +96,7 @@ pub fn assess_command_safety(
     sandbox_policy: &SandboxPolicy,
     approved: &HashSet<Vec<String>>,
     with_escalated_permissions: bool,
+    repo_root: &Path,
 ) -> SafetyCheck {
     // Some commands look dangerous. Even if they are run inside a sandbox,
     // unless the user has explicitly approved them, we should ask,
@@ -124,7 +126,8 @@ pub fn assess_command_safety(
     // `approved.contains(command)` is `true`, the user may have approved it for
     // the session _because_ they know it needs to run outside a sandbox.
 
-    if is_known_safe_command(command) || approved.contains(command) {
+    let allowlisted = ExecWhitelistToml::load_from_repo_root(repo_root).matches(command);
+    if is_known_safe_command(command) || approved.contains(command) || allowlisted {
         let user_explicitly_approved = approved.contains(command);
         return SafetyCheck::AutoApprove {
             sandbox_type: SandboxType::None,
@@ -355,6 +358,7 @@ mod tests {
             &sandbox_policy,
             &approved,
             request_escalated_privileges,
+            std::env::temp_dir().as_path(),
         );
 
         assert_eq!(safety_check, SafetyCheck::AskUser);
@@ -375,6 +379,7 @@ mod tests {
             &sandbox_policy,
             &approved,
             request_escalated_privileges,
+            std::env::temp_dir().as_path(),
         );
 
         assert_eq!(
@@ -400,6 +405,7 @@ mod tests {
             &sandbox_policy,
             &approved,
             request_escalated_privileges,
+            std::env::temp_dir().as_path(),
         );
 
         assert_eq!(
@@ -425,6 +431,7 @@ mod tests {
             &sandbox_policy,
             &approved,
             request_escalated_privileges,
+            std::env::temp_dir().as_path(),
         );
 
         let expected = match get_platform_sandbox() {
