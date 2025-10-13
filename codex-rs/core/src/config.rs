@@ -6,9 +6,9 @@ use crate::config_types::ReasoningSummaryFormat;
 use crate::config_types::SandboxWorkspaceWrite;
 use crate::config_types::ShellEnvironmentPolicy;
 use crate::config_types::ShellEnvironmentPolicyToml;
-use crate::config_types::TelemetryConfig;
-use crate::config_types::TelemetryConfigToml;
-use crate::config_types::TelemetryExporterKind;
+use crate::config_types::OtelConfig;
+use crate::config_types::OtelConfigToml;
+use crate::config_types::OtelExporterKind;
 use crate::config_types::Tui;
 use crate::config_types::UriBasedFileOpener;
 use crate::git_info::resolve_root_git_project_for_trust;
@@ -25,8 +25,9 @@ use codex_protocol::config_types::ReasoningEffort;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::config_types::Verbosity;
-use codex_protocol::mcp_protocol::Tools;
-use codex_protocol::mcp_protocol::UserSavedConfig;
+use codex_app_server_protocol::Tools;
+use codex_app_server_protocol::UserSavedConfig;
+use codex_rmcp_client::OAuthCredentialsStoreMode;
 use dirs::home_dir;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -177,8 +178,8 @@ pub struct Config {
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: String,
 
-    /// Effective telemetry configuration for this process.
-    pub telemetry: TelemetryConfig,
+    /// Effective OpenTelemetry configuration for this process.
+    pub otel: OtelConfig,
 
     /// Include an experimental plan tool that the model can use to update its current plan and status of each step.
     pub include_plan_tool: bool,
@@ -205,6 +206,18 @@ pub struct Config {
     /// All characters are inserted as they are received, and no buffering
     /// or placeholder replacement will occur for fast keypress bursts.
     pub disable_paste_burst: bool,
+
+    /// Additional filenames to consider when searching for project docs.
+    pub project_doc_fallback_filenames: Vec<String>,
+
+    /// Feature flag to enable experimental RMCP client support.
+    pub use_experimental_use_rmcp_client: bool,
+
+    /// Controls where MCP OAuth credentials are stored/read from.
+    pub mcp_oauth_credentials_store_mode: OAuthCredentialsStoreMode,
+
+    /// True when Windows WSL onboarding prompt has been acknowledged.
+    pub windows_wsl_setup_acknowledged: bool,
 }
 
 impl Config {
@@ -214,7 +227,7 @@ impl Config {
     ///
     /// The precedence order is therefore: `config.toml` < `-c` overrides <
     /// `ConfigOverrides`.
-    pub fn load_with_cli_overrides(
+    pub async fn load_with_cli_overrides(
         cli_overrides: Vec<(String, TomlValue)>,
         overrides: ConfigOverrides,
     ) -> std::io::Result<Self> {
@@ -264,7 +277,7 @@ impl Config {
     }
 }
 
-pub fn load_config_as_toml_with_cli_overrides(
+pub async fn load_config_as_toml_with_cli_overrides(
     codex_home: &Path,
     cli_overrides: Vec<(String, TomlValue)>,
 ) -> std::io::Result<ConfigToml> {
@@ -357,7 +370,7 @@ fn merge_toml_values(dst: &mut TomlValue, src: &TomlValue) {
     }
 }
 
-pub fn load_global_mcp_servers(
+pub async fn load_global_mcp_servers(
     codex_home: &Path,
 ) -> std::io::Result<BTreeMap<String, McpServerConfig>> {
     let root_value = load_config_as_toml(codex_home)?;
@@ -394,37 +407,50 @@ pub fn write_global_mcp_servers(
         for (name, config) in servers {
             let mut entry = TomlTable::new();
             entry.set_implicit(false);
-            entry["command"] = toml_edit::value(config.command.clone());
-
-            if !config.args.is_empty() {
-                let mut args = TomlArray::new();
-                for arg in &config.args {
-                    args.push(arg.clone());
+            // Transport-specific settings
+            match &config.transport {
+                crate::config_types::McpServerTransportConfig::Stdio { command, args, env } => {
+                    entry["command"] = toml_edit::value(command.clone());
+                    if !args.is_empty() {
+                        let mut arr = TomlArray::new();
+                        for arg in args {
+                            arr.push(arg.clone());
+                        }
+                        entry["args"] = TomlItem::Value(arr.into());
+                    }
+                    if let Some(env) = env {
+                        if !env.is_empty() {
+                            let mut env_table = TomlTable::new();
+                            env_table.set_implicit(false);
+                            let mut pairs: Vec<_> = env.iter().collect();
+                            pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+                            for (key, value) in pairs {
+                                env_table.insert(key, toml_edit::value(value.clone()));
+                            }
+                            entry["env"] = TomlItem::Table(env_table);
+                        }
+                    }
                 }
-                entry["args"] = TomlItem::Value(args.into());
+                crate::config_types::McpServerTransportConfig::StreamableHttp {
+                    url,
+                    bearer_token_env_var,
+                } => {
+                    entry["url"] = toml_edit::value(url.clone());
+                    if let Some(var) = bearer_token_env_var {
+                        entry["bearer_token_env_var"] = toml_edit::value(var.clone());
+                    }
+                }
             }
 
-            if let Some(env) = &config.env
-                && !env.is_empty()
-            {
-                let mut env_table = TomlTable::new();
-                env_table.set_implicit(false);
-                let mut pairs: Vec<_> = env.iter().collect();
-                pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
-                for (key, value) in pairs {
-                    env_table.insert(key, toml_edit::value(value.clone()));
-                }
-                entry["env"] = TomlItem::Table(env_table);
+            // Common flags
+            if !config.enabled {
+                entry["enabled"] = toml_edit::value(false);
             }
-
-            if let Some(timeout) = config.startup_timeout_ms {
-                let timeout = i64::try_from(timeout).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "startup_timeout_ms exceeds supported range",
-                    )
-                })?;
-                entry["startup_timeout_ms"] = toml_edit::value(timeout);
+            if let Some(timeout) = config.startup_timeout_sec {
+                entry["startup_timeout_sec"] = toml_edit::value(timeout.as_secs_f64());
+            }
+            if let Some(timeout) = config.tool_timeout_sec {
+                entry["tool_timeout_sec"] = toml_edit::value(timeout.as_secs_f64());
             }
 
             doc["mcp_servers"][name.as_str()] = TomlItem::Table(entry);
@@ -527,6 +553,26 @@ pub fn set_project_trusted(codex_home: &Path, project_path: &Path) -> anyhow::Re
     // atomically move the tmp file into config.toml
     tmp_file.persist(config_path)?;
 
+    Ok(())
+}
+
+/// Persist that the Windows WSL onboarding prompt was acknowledged by the user.
+pub fn set_windows_wsl_setup_acknowledged(codex_home: &Path) -> std::io::Result<()> {
+    let config_path = codex_home.join(CONFIG_TOML_FILE);
+    let mut doc = match std::fs::read_to_string(&config_path) {
+        Ok(contents) => contents
+            .parse::<DocumentMut>()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DocumentMut::new(),
+        Err(e) => return Err(e),
+    };
+
+    doc["windows_wsl_setup_acknowledged"] = toml_edit::value(true);
+
+    std::fs::create_dir_all(codex_home)?;
+    let tmp_file = NamedTempFile::new_in(codex_home)?;
+    std::fs::write(tmp_file.path(), doc.to_string())?;
+    tmp_file.persist(config_path).map_err(|err| err.error)?;
     Ok(())
 }
 
@@ -760,8 +806,8 @@ pub struct ConfigToml {
     /// Collection of settings that are specific to the TUI.
     pub tui: Option<Tui>,
 
-    /// Telemetry configuration.
-    pub telemetry: Option<TelemetryConfigToml>,
+    /// OpenTelemetry configuration.
+    pub otel: Option<OtelConfigToml>,
 
     /// When set to `true`, `AgentReasoning` events will be hidden from the
     /// UI/output. Defaults to `false`.
@@ -800,6 +846,19 @@ pub struct ConfigToml {
     /// All characters are inserted as they are received, and no buffering
     /// or placeholder replacement will occur for fast keypress bursts.
     pub disable_paste_burst: Option<bool>,
+
+    /// Additional fallback filenames to search for project docs.
+    #[serde(default)]
+    pub project_doc_fallback_filenames: Option<Vec<String>>,
+
+    /// [experimental] Enable RMCP client/tooling.
+    pub experimental_use_rmcp_client: Option<bool>,
+
+    /// Where to store MCP OAuth credentials.
+    pub mcp_oauth_credentials_store_mode: Option<OAuthCredentialsStoreMode>,
+
+    /// Track whether Windows WSL onboarding prompt has been acknowledged.
+    pub windows_wsl_setup_acknowledged: Option<bool>,
 }
 
 impl From<ConfigToml> for UserSavedConfig {
@@ -1033,16 +1092,14 @@ impl Config {
 
         let history = cfg.history.unwrap_or_default();
 
-        // Build effective telemetry config with sane defaults.
-        let telemetry_cfg_toml = cfg.telemetry.clone().unwrap_or_default();
-        let telemetry = TelemetryConfig {
-            enabled: telemetry_cfg_toml.enabled.unwrap_or(true),
-            exporter: telemetry_cfg_toml
-                .exporter
-                .unwrap_or(TelemetryExporterKind::OtlpFile),
-            endpoint: telemetry_cfg_toml.endpoint,
-            headers: telemetry_cfg_toml.headers.unwrap_or_default(),
-            rotate_mb: telemetry_cfg_toml.rotate_mb,
+        // Build effective OTEL config with sane defaults.
+        let otel_cfg_toml = cfg.otel.clone().unwrap_or_default();
+        let otel = OtelConfig {
+            log_user_prompt: otel_cfg_toml.log_user_prompt.unwrap_or(false),
+            environment: otel_cfg_toml
+                .environment
+                .unwrap_or_else(|| crate::config_types::DEFAULT_OTEL_ENVIRONMENT.to_string()),
+            exporter: otel_cfg_toml.exporter.unwrap_or(OtelExporterKind::None),
         };
 
         let tools_web_search_request = override_tools_web_search_request
@@ -1146,7 +1203,7 @@ impl Config {
                 .chatgpt_base_url
                 .or(cfg.chatgpt_base_url)
                 .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
-            telemetry,
+            otel,
             include_plan_tool: include_plan_tool.unwrap_or(false),
             include_apply_patch_tool: include_apply_patch_tool.unwrap_or(false),
             tools_web_search_request,
@@ -1164,6 +1221,16 @@ impl Config {
                 .as_ref()
                 .map(|t| t.notifications.clone())
                 .unwrap_or_default(),
+            project_doc_fallback_filenames: cfg
+                .project_doc_fallback_filenames
+                .unwrap_or_default(),
+            use_experimental_use_rmcp_client: cfg.experimental_use_rmcp_client.unwrap_or(false),
+            mcp_oauth_credentials_store_mode: cfg
+                .mcp_oauth_credentials_store_mode
+                .unwrap_or_default(),
+            windows_wsl_setup_acknowledged: cfg
+                .windows_wsl_setup_acknowledged
+                .unwrap_or(false),
         };
         Ok(config)
     }

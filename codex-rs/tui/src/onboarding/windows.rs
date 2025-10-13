@@ -54,7 +54,7 @@ impl WindowsSetupWidget {
 
     fn handle_continue(&mut self) {
         self.highlighted = WindowsSetupSelection::Continue;
-        match set_windows_wsl_setup_acknowledged(&self.codex_home, true) {
+        match set_windows_wsl_setup_acknowledged(&self.codex_home) {
             Ok(()) => {
                 self.selection = Some(WindowsSetupSelection::Continue);
                 self.exit_requested = false;
