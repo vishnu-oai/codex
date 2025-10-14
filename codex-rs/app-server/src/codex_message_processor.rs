@@ -1504,7 +1504,7 @@ mod tests {
                 "id": conversation_id.to_string(),
                 "timestamp": timestamp,
                 "cwd": "/",
-                "originator": "codex",
+                "originator": "fm-codex",
                 "cli_version": "0.0.0",
                 "instructions": null
             }),

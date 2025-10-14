@@ -215,7 +215,7 @@ impl MessageProcessor {
             server_info: mcp_types::Implementation {
                 name: "codex-mcp-server".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
-                title: Some("Codex".to_string()),
+                title: Some("FastModels Codex".to_string()),
                 user_agent: Some(get_codex_user_agent()),
             },
         };

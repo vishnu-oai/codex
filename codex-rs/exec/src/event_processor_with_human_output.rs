@@ -204,7 +204,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 ts_msg!(
                     self,
                     "{}\n{}",
-                    "codex".style(self.italic).style(self.magenta),
+                    "FastModels Codex".style(self.italic).style(self.magenta),
                     message,
                 );
             }
