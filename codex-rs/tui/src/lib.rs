@@ -17,6 +17,8 @@ use codex_core::config::ConfigToml;
 use codex_core::config::find_codex_home;
 use codex_core::config::load_config_as_toml_with_cli_overrides;
 use codex_core::find_conversation_path_by_id_str;
+use codex_protocol::protocol::USER_INSTRUCTIONS_CLOSE_TAG;
+use codex_protocol::protocol::USER_INSTRUCTIONS_OPEN_TAG;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_ollama::DEFAULT_OSS_MODEL;
@@ -66,6 +68,7 @@ mod status;
 mod status_indicator_widget;
 mod streaming;
 mod style;
+mod tasks;
 mod terminal_palette;
 mod text_formatting;
 mod tui;
@@ -450,6 +453,37 @@ async fn run_ratatui_app(
     };
 
     let Cli { prompt, images, .. } = cli;
+
+    // Expand "\\taskname" shorthand by embedding task prompt from .codex/tasks.yaml
+    let prompt = if let Some(p) = &prompt {
+        let trimmed = p.trim_start();
+        if let Some(rest) = trimmed.strip_prefix('\\') {
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let task_name = parts.next().unwrap_or("");
+            if !task_name.is_empty() {
+                let remaining = parts.next().unwrap_or("");
+                let cwd = config.cwd.clone();
+                match crate::tasks::get_task_prompt(&cwd, task_name) {
+                    Ok(Some(task_text)) => {
+                        Some(format!(
+                            "{remaining}\n\n{open}\n{task}\n{close}",
+                            remaining = remaining.trim(),
+                            open = USER_INSTRUCTIONS_OPEN_TAG,
+                            task = task_text,
+                            close = USER_INSTRUCTIONS_CLOSE_TAG,
+                        ))
+                    }
+                    _ => Some(p.clone()),
+                }
+            } else {
+                Some(p.clone())
+            }
+        } else {
+            Some(p.clone())
+        }
+    } else {
+        None
+    };
 
     let app_result = App::run(
         &mut tui,

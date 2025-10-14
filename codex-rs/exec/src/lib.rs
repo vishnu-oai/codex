@@ -192,6 +192,26 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         }
     }
 
+    // Support shorthand: if prompt starts with "\\taskname ...", expand from .codex/tasks.yaml
+    let trimmed = prompt.trim_start();
+    if let Some(rest) = trimmed.strip_prefix('\\') {
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let task_name = parts.next().unwrap_or("");
+        if !task_name.is_empty() {
+            let remaining = parts.next().unwrap_or("");
+            let cwdp = cwd.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            if let Some(task_text) = tasks::get_task_prompt(&cwdp, task_name)? {
+                prompt = format!(
+                    "{remaining}\n\n{open}\n{task}\n{close}",
+                    remaining = remaining.trim(),
+                    open = USER_INSTRUCTIONS_OPEN_TAG,
+                    task = task_text,
+                    close = USER_INSTRUCTIONS_CLOSE_TAG,
+                );
+            }
+        }
+    }
+
     let output_schema = load_output_schema(output_schema_path);
 
     let (stdout_with_ansi, stderr_with_ansi) = match color {
