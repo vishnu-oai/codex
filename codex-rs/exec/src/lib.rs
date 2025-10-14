@@ -46,6 +46,10 @@ use crate::event_processor::CodexStatus;
 use crate::event_processor::EventProcessor;
 use codex_core::default_client::set_default_originator;
 use codex_core::find_conversation_path_by_id_str;
+use codex_protocol::protocol::USER_INSTRUCTIONS_CLOSE_TAG;
+use codex_protocol::protocol::USER_INSTRUCTIONS_OPEN_TAG;
+
+mod tasks;
 
 pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()> {
     if let Err(err) = set_default_originator("fm-codex".to_string()) {
@@ -70,17 +74,71 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         output_schema: output_schema_path,
         include_plan_tool,
         config_overrides,
+        task: task_name,
     } = cli;
+
+    // Handle `codex-exec tasks ...` management commands early and exit.
+    if let Some(ExecCommand::Tasks(tasks_cmd)) = &command {
+        use crate::tasks as taskio;
+        let cwd_path = cwd.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        match &tasks_cmd.sub {
+            crate::cli::TasksSubcommand::Init => {
+                let path = taskio::init_tasks_file(&cwd_path)?;
+                println!("Initialized {}", path.display());
+            }
+            crate::cli::TasksSubcommand::List => {
+                let names = taskio::list_task_names(&cwd_path)?;
+                for n in names {
+                    println!("\\ {}", n);
+                }
+            }
+            crate::cli::TasksSubcommand::Show { name } => {
+                match taskio::get_task_prompt(&cwd_path, name)? {
+                    Some(p) => println!("{}", p),
+                    None => {
+                        eprintln!("Task not found: {}", name);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            crate::cli::TasksSubcommand::Add {
+                name,
+                prompt,
+                description,
+            } => {
+                let content = if let Some(p) = prompt {
+                    p.clone()
+                } else {
+                    use std::io::Read as _;
+                    let mut buf = String::new();
+                    std::io::stdin().read_to_string(&mut buf)?;
+                    buf
+                };
+                taskio::add_or_update_task(&cwd_path, name, content, description.clone())?;
+                println!("Saved task: {}", name);
+            }
+            crate::cli::TasksSubcommand::AddFile {
+                name,
+                file,
+                description,
+            } => {
+                let abs = taskio::add_or_update_task_file(&cwd_path, name, file, description.clone())?;
+                println!("Saved task file: {} -> {}", name, abs.display());
+            }
+        }
+        return Ok(());
+    }
 
     // Determine the prompt source (parent or subcommand) and read from stdin if needed.
     let prompt_arg = match &command {
         // Allow prompt before the subcommand by falling back to the parent-level prompt
         // when the Resume subcommand did not provide its own prompt.
         Some(ExecCommand::Resume(args)) => args.prompt.clone().or(prompt),
+        Some(ExecCommand::Tasks(_)) => None,
         None => prompt,
     };
 
-    let prompt = match prompt_arg {
+    let mut prompt = match prompt_arg {
         Some(p) if p != "-" => p,
         // Either `-` was passed or no positional arg.
         maybe_dash => {
@@ -113,6 +171,26 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
             buffer
         }
     };
+
+    // If a task was specified, append its prompt wrapped in user_instructions tags.
+    if let Some(name) = &task_name {
+        let cwd_path = cwd.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        match tasks::get_task_prompt(&cwd_path, name)? {
+            Some(task_text) => {
+                prompt = format!(
+                    "{orig}\n\n{open}\n{task}\n{close}",
+                    orig = prompt,
+                    open = USER_INSTRUCTIONS_OPEN_TAG,
+                    task = task_text,
+                    close = USER_INSTRUCTIONS_CLOSE_TAG,
+                );
+            }
+            None => {
+                eprintln!("Task not found: {}", name);
+                std::process::exit(1);
+            }
+        }
+    }
 
     let output_schema = load_output_schema(output_schema_path);
 

@@ -79,12 +79,18 @@ pub struct Cli {
     /// if `-` is used), instructions are read from stdin.
     #[arg(value_name = "PROMPT", value_hint = clap::ValueHint::Other)]
     pub prompt: Option<String>,
+
+    /// Run a saved task from .codex/tasks.yaml. The task prompt is appended to your prompt.
+    #[arg(long = "task", value_name = "NAME")]
+    pub task: Option<String>,
 }
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
     /// Resume a previous session by id or pick the most recent with --last.
     Resume(ResumeArgs),
+    /// Manage saved tasks in .codex/tasks.yaml
+    Tasks(TasksCommand),
 }
 
 #[derive(Parser, Debug)]
@@ -101,6 +107,37 @@ pub struct ResumeArgs {
     /// Prompt to send after resuming the session. If `-` is used, read from stdin.
     #[arg(value_name = "PROMPT", value_hint = clap::ValueHint::Other)]
     pub prompt: Option<String>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum TasksSubcommand {
+    /// Initialize an empty .codex/tasks.yaml in the current directory
+    Init,
+    /// List saved task names
+    List,
+    /// Show task prompt
+    Show { name: String },
+    /// Add or update a task with inline prompt (from --prompt or stdin)
+    Add {
+        name: String,
+        #[arg(long = "prompt")]
+        prompt: Option<String>,
+        #[arg(long = "description")]
+        description: Option<String>,
+    },
+    /// Add or update a task that reads from a prompt file under .codex/
+    AddFile {
+        name: String,
+        file: String,
+        #[arg(long = "description")]
+        description: Option<String>,
+    },
+}
+
+#[derive(Debug, clap::Parser)]
+pub struct TasksCommand {
+    #[command(subcommand)]
+    pub sub: TasksSubcommand,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]

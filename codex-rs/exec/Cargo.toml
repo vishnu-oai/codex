@@ -30,6 +30,7 @@ opentelemetry-appender-tracing = { workspace = true }
 owo-colors = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+serde_yaml = "0.9"
 shlex = { workspace = true }
 supports-color = { workspace = true }
 tokio = { workspace = true, features = [
