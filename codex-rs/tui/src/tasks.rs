@@ -23,9 +23,26 @@ pub struct Task {
 }
 
 pub fn tasks_file_path(cwd: &Path) -> PathBuf {
+    // Walk up to the repo root (directory containing .git) if present; otherwise use cwd.
+    let mut cursor = cwd.to_path_buf();
+    let mut candidate = cursor.join(".codex").join("tasks.yaml");
+    while let Some(parent) = cursor.parent() {
+        if candidate.exists() {
+            return candidate;
+        }
+        let git_marker = cursor.join(".git");
+        if git_marker.exists() {
+            // Prefer tasks.yaml in repo root .codex even if not present in subdir.
+            return cursor.join(".codex").join("tasks.yaml");
+        }
+        cursor = parent.to_path_buf();
+        candidate = cursor.join(".codex").join("tasks.yaml");
+    }
+    // Fallback: current directory
     cwd.join(".codex").join("tasks.yaml")
 }
 
+#[allow(dead_code)]
 pub fn init_tasks_file(cwd: &Path) -> Result<PathBuf> {
     let path = tasks_file_path(cwd);
     if let Some(dir) = path.parent() {
@@ -48,6 +65,7 @@ pub fn load_tasks(cwd: &Path) -> Result<TaskConfig> {
     Ok(cfg)
 }
 
+#[allow(dead_code)]
 pub fn save_tasks(cwd: &Path, cfg: &TaskConfig) -> Result<()> {
     let path = tasks_file_path(cwd);
     if let Some(dir) = path.parent() {
@@ -58,6 +76,7 @@ pub fn save_tasks(cwd: &Path, cfg: &TaskConfig) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn add_or_update_task(
     cwd: &Path,
     name: &str,
@@ -83,6 +102,7 @@ pub fn add_or_update_task(
 
 /// Add or update a task to reference a prompt file stored under `.codex/`.
 /// If the file does not exist, it will be created (empty).
+#[allow(dead_code)]
 pub fn add_or_update_task_file(
     cwd: &Path,
     name: &str,
@@ -127,6 +147,7 @@ pub fn add_or_update_task_file(
     Ok(abs_path)
 }
 
+#[allow(dead_code)]
 pub fn list_task_names(cwd: &Path) -> Result<Vec<String>> {
     let cfg = load_tasks(cwd)?;
     Ok(cfg.tasks.into_iter().map(|t| t.name).collect())

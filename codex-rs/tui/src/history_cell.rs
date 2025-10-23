@@ -118,12 +118,15 @@ impl HistoryCell for UserHistoryCell {
 
         let style = user_message_style();
 
+        // Build lines: style entire message uniformly (no special token coloring).
+        let raw_lines: Vec<Line<'static>> = self
+            .message
+            .lines()
+            .map(|l| Line::from(l.to_string()).style(style))
+            .collect::<Vec<_>>();
+
         let wrapped = word_wrap_lines(
-            &self
-                .message
-                .lines()
-                .map(|l| Line::from(l).style(style))
-                .collect::<Vec<_>>(),
+            &raw_lines,
             // Wrap algorithm matches textarea.rs.
             RtOptions::new(wrap_width as usize).wrap_algorithm(textwrap::WrapAlgorithm::FirstFit),
         );

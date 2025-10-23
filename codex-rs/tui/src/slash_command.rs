@@ -25,6 +25,10 @@ pub enum SlashCommand {
     Mcp,
     Logout,
     Quit,
+    InitTasks,
+    AddTask,
+    ListTask,
+    AddTaskFile,
     #[cfg(debug_assertions)]
     TestApproval,
 }
@@ -46,6 +50,10 @@ impl SlashCommand {
             SlashCommand::Approvals => "choose what Codex can do without approval",
             SlashCommand::Mcp => "list configured MCP tools",
             SlashCommand::Logout => "log out of Codex",
+            SlashCommand::InitTasks => "initialize or reset custom tasks file",
+            SlashCommand::AddTask => "add a custom task: /add-task <name> \"prompt\"",
+            SlashCommand::ListTask => "list configured custom tasks",
+            SlashCommand::AddTaskFile => "link a task to a file: /add-task-file <name> <file>",
             #[cfg(debug_assertions)]
             SlashCommand::TestApproval => "test approval request",
         }
@@ -72,7 +80,11 @@ impl SlashCommand {
             | SlashCommand::Mention
             | SlashCommand::Status
             | SlashCommand::Mcp
-            | SlashCommand::Quit => true,
+            | SlashCommand::Quit
+            | SlashCommand::InitTasks
+            | SlashCommand::AddTask
+            | SlashCommand::ListTask
+            | SlashCommand::AddTaskFile => true,
 
             #[cfg(debug_assertions)]
             SlashCommand::TestApproval => true,

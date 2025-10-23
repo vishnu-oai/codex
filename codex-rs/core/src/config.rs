@@ -2,13 +2,13 @@ use crate::config_profile::ConfigProfile;
 use crate::config_types::History;
 use crate::config_types::McpServerConfig;
 use crate::config_types::Notifications;
+use crate::config_types::OtelConfig;
+use crate::config_types::OtelConfigToml;
+use crate::config_types::OtelExporterKind;
 use crate::config_types::ReasoningSummaryFormat;
 use crate::config_types::SandboxWorkspaceWrite;
 use crate::config_types::ShellEnvironmentPolicy;
 use crate::config_types::ShellEnvironmentPolicyToml;
-use crate::config_types::OtelConfig;
-use crate::config_types::OtelConfigToml;
-use crate::config_types::OtelExporterKind;
 use crate::config_types::Tui;
 use crate::config_types::UriBasedFileOpener;
 use crate::git_info::resolve_root_git_project_for_trust;
@@ -21,12 +21,12 @@ use crate::openai_model_info::get_model_info;
 use crate::protocol::AskForApproval;
 use crate::protocol::SandboxPolicy;
 use anyhow::Context;
+use codex_app_server_protocol::Tools;
+use codex_app_server_protocol::UserSavedConfig;
 use codex_protocol::config_types::ReasoningEffort;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::config_types::Verbosity;
-use codex_app_server_protocol::Tools;
-use codex_app_server_protocol::UserSavedConfig;
 use codex_rmcp_client::OAuthCredentialsStoreMode;
 use dirs::home_dir;
 use serde::Deserialize;
@@ -351,8 +351,6 @@ fn load_project_overrides_as_toml(project_root: &Path) -> std::io::Result<TomlVa
 /// - Tables are merged key-by-key (recursively).
 /// - Arrays and scalars are replaced entirely by `src`.
 fn merge_toml_values(dst: &mut TomlValue, src: &TomlValue) {
-    use toml::value::Table;
-
     match (dst, src) {
         (TomlValue::Table(dst_tbl), TomlValue::Table(src_tbl)) => {
             for (k, v) in src_tbl.iter() {
@@ -1221,16 +1219,12 @@ impl Config {
                 .as_ref()
                 .map(|t| t.notifications.clone())
                 .unwrap_or_default(),
-            project_doc_fallback_filenames: cfg
-                .project_doc_fallback_filenames
-                .unwrap_or_default(),
+            project_doc_fallback_filenames: cfg.project_doc_fallback_filenames.unwrap_or_default(),
             use_experimental_use_rmcp_client: cfg.experimental_use_rmcp_client.unwrap_or(false),
             mcp_oauth_credentials_store_mode: cfg
                 .mcp_oauth_credentials_store_mode
                 .unwrap_or_default(),
-            windows_wsl_setup_acknowledged: cfg
-                .windows_wsl_setup_acknowledged
-                .unwrap_or(false),
+            windows_wsl_setup_acknowledged: cfg.windows_wsl_setup_acknowledged.unwrap_or(false),
         };
         Ok(config)
     }

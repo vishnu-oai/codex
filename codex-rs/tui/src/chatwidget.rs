@@ -85,6 +85,8 @@ use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
+use codex_protocol::protocol::USER_INSTRUCTIONS_CLOSE_TAG;
+use codex_protocol::protocol::USER_INSTRUCTIONS_OPEN_TAG;
 mod interrupts;
 use self::interrupts::InterruptManager;
 mod agent;
@@ -1130,6 +1132,58 @@ impl ChatWidget {
                 const INIT_PROMPT: &str = include_str!("../prompt_for_init_command.md");
                 self.submit_text_message(INIT_PROMPT.to_string());
             }
+            SlashCommand::InitTasks => {
+                let cwd = self.config.cwd.clone();
+                match crate::tasks::init_tasks_file(&cwd) {
+                    Ok(path) => {
+                        self.add_info_message(
+                            format!("initialized tasks file: {}", path.display()),
+                            Some("add with /add-task or /add-task-file".to_string()),
+                        );
+                    }
+                    Err(err) => {
+                        self.add_to_history(history_cell::new_error_event(format!(
+                            "failed to initialize tasks file: {err}"
+                        )));
+                        self.request_redraw();
+                    }
+                }
+            }
+            SlashCommand::ListTask => {
+                let cwd = self.config.cwd.clone();
+                match crate::tasks::list_task_names(&cwd) {
+                    Ok(mut names) => {
+                        names.sort();
+                        let message = if names.is_empty() {
+                            "no custom tasks configured".to_string()
+                        } else {
+                            format!("custom tasks: {}", names.join(", "))
+                        };
+                        self.add_info_message(
+                            message,
+                            Some("run with \\name from composer".to_string()),
+                        );
+                    }
+                    Err(err) => {
+                        self.add_to_history(history_cell::new_error_event(format!(
+                            "failed to list tasks: {err}"
+                        )));
+                        self.request_redraw();
+                    }
+                }
+            }
+            SlashCommand::AddTask => {
+                self.add_info_message(
+                    "usage: /add-task <name> \"prompt text\"".to_string(),
+                    Some("or /add-task-file <name> <file>".to_string()),
+                );
+            }
+            SlashCommand::AddTaskFile => {
+                self.add_info_message(
+                    "usage: /add-task-file <name> <file>".to_string(),
+                    Some("path is relative to .codex/".to_string()),
+                );
+            }
             SlashCommand::Compact => {
                 self.clear_token_usage();
                 self.app_event_tx.send(AppEvent::CodexOp(Op::Compact));
@@ -1275,7 +1329,34 @@ impl ChatWidget {
         let mut items: Vec<InputItem> = Vec::new();
 
         if !text.is_empty() {
-            items.push(InputItem::Text { text: text.clone() });
+            // Support "\\taskname ..." shorthand expansion from .codex/tasks.yaml
+            let (send_text, _display_text) =
+                if let Some(rest) = text.trim_start().strip_prefix('\\') {
+                    let mut parts = rest.splitn(2, char::is_whitespace);
+                    let task_name = parts.next().unwrap_or("");
+                    if !task_name.is_empty() {
+                        let remaining = parts.next().unwrap_or("");
+                        match crate::tasks::get_task_prompt(&self.config.cwd, task_name) {
+                            Ok(Some(task_text)) => {
+                                let expanded = format!(
+                                    "{remaining}\n\n{open}\n{task}\n{close}",
+                                    remaining = remaining.trim(),
+                                    open = USER_INSTRUCTIONS_OPEN_TAG,
+                                    task = task_text,
+                                    close = USER_INSTRUCTIONS_CLOSE_TAG,
+                                );
+                                (expanded, text.clone())
+                            }
+                            _ => (text.clone(), text.clone()),
+                        }
+                    } else {
+                        (text.clone(), text.clone())
+                    }
+                } else {
+                    (text.clone(), text.clone())
+                };
+
+            items.push(InputItem::Text { text: send_text });
         }
 
         for path in image_paths {
@@ -1933,10 +2014,27 @@ impl ChatWidget {
     }
 
     fn on_list_custom_prompts(&mut self, ev: ListCustomPromptsResponseEvent) {
-        let len = ev.custom_prompts.len();
-        debug!("received {len} custom prompts");
-        // Forward to bottom pane so the slash popup can show them now.
-        self.bottom_pane.set_custom_prompts(ev.custom_prompts);
+        use codex_protocol::custom_prompts::CustomPrompt;
+        let cwd = self.config.cwd.clone();
+        // Start with prompts discovered by the core.
+        let prompts: Vec<CustomPrompt> = ev.custom_prompts;
+        self.bottom_pane.set_custom_prompts(prompts);
+        // Load YAML-backed tasks from `.codex/tasks.yaml` and surface separately so
+        // they can be invoked directly as "/<name>" and colored in the popup.
+        if let Ok(cfg) = crate::tasks::load_tasks(&cwd) {
+            let mut tasks_enriched: Vec<(String, Option<String>, String)> = Vec::new();
+            for t in cfg.tasks {
+                let content = if let Some(rel) = t.prompt_file.as_ref() {
+                    let p = cwd.join(".codex").join(rel);
+                    std::fs::read_to_string(&p).unwrap_or_default()
+                } else {
+                    t.prompt.join("\n")
+                };
+                tasks_enriched.push((t.name, t.description, content));
+            }
+            // Provide tasks to bottom pane so they appear as /<name> in the popup.
+            self.bottom_pane.set_custom_tasks(tasks_enriched);
+        }
     }
 
     pub(crate) fn open_review_popup(&mut self) {

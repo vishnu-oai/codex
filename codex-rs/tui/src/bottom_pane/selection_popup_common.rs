@@ -10,6 +10,8 @@ use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthChar;
 
 use crate::key_hint::KeyBinding;
+use ratatui::style::Style;
+use ratatui::style::Styled;
 
 use super::scroll_state::ScrollState;
 
@@ -20,6 +22,7 @@ pub(crate) struct GenericDisplayRow {
     pub match_indices: Option<Vec<usize>>, // indices to bold (char positions)
     pub is_current: bool,
     pub description: Option<String>, // optional grey text after the name
+    pub name_color: Option<Color>,   // optional color for the name (e.g., tasks)
 }
 
 /// Compute a shared description-column start based on the widest visible name
@@ -68,12 +71,15 @@ fn build_full_line(row: &GenericDisplayRow, desc_col: usize) -> Line<'static> {
             }
             used_width += ch_w;
 
+            let mut s: Span = ch.to_string().into();
+            if let Some(color) = row.name_color {
+                s = s.set_style(Style::default().fg(color));
+            }
             if idx_iter.peek().is_some_and(|next| **next == char_idx) {
                 idx_iter.next();
-                name_spans.push(ch.to_string().bold());
-            } else {
-                name_spans.push(ch.to_string().into());
+                s = s.bold();
             }
+            name_spans.push(s);
         }
     } else {
         for ch in row.name.chars() {
@@ -83,7 +89,11 @@ fn build_full_line(row: &GenericDisplayRow, desc_col: usize) -> Line<'static> {
                 break;
             }
             used_width += ch_w;
-            name_spans.push(ch.to_string().into());
+            let mut s: Span = ch.to_string().into();
+            if let Some(color) = row.name_color {
+                s = s.set_style(Style::default().fg(color));
+            }
+            name_spans.push(s);
         }
     }
 
@@ -165,6 +175,7 @@ pub(crate) fn render_rows(
             display_shortcut,
             is_current: _is_current,
             description,
+            ..
         } = row;
 
         let mut full_line = build_full_line(
@@ -174,6 +185,7 @@ pub(crate) fn render_rows(
                 display_shortcut: *display_shortcut,
                 is_current: *_is_current,
                 description: description.clone(),
+                name_color: row.name_color,
             },
             desc_col,
         );

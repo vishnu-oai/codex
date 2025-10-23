@@ -40,6 +40,9 @@ use crate::slash_command::built_in_slash_commands;
 use crate::style::user_message_style;
 use codex_protocol::custom_prompts::CustomPrompt;
 use codex_protocol::custom_prompts::PROMPTS_CMD_PREFIX;
+use codex_protocol::protocol::USER_INSTRUCTIONS_CLOSE_TAG;
+use codex_protocol::protocol::USER_INSTRUCTIONS_OPEN_TAG;
+// Submit tasks as user_instructions only; do not inject a separate user_message wrapper.
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
@@ -106,6 +109,7 @@ pub(crate) struct ChatComposer {
     // When true, disables paste-burst logic and inserts characters immediately.
     disable_paste_burst: bool,
     custom_prompts: Vec<CustomPrompt>,
+    custom_tasks: Vec<(String, Option<String>, String)>,
     footer_mode: FooterMode,
     footer_hint_override: Option<Vec<(String, String)>>,
     context_window_percent: Option<u8>,
@@ -149,6 +153,7 @@ impl ChatComposer {
             paste_burst: PasteBurst::default(),
             disable_paste_burst: false,
             custom_prompts: Vec::new(),
+            custom_tasks: Vec::new(),
             footer_mode: FooterMode::ShortcutSummary,
             footer_hint_override: None,
             context_window_percent: None,
@@ -482,6 +487,18 @@ impl ChatComposer {
                                 }
                             }
                         }
+                        CommandItem::Task(i) => {
+                            if let Some((name, _desc, _content)) = popup.task(i) {
+                                let starts_with_cmd =
+                                    first_line.trim_start().starts_with(&format!("/{}", name));
+                                if !starts_with_cmd {
+                                    self.textarea.set_text(&format!("/{} ", name));
+                                }
+                                if !self.textarea.text().is_empty() {
+                                    cursor_target = Some(self.textarea.text().len());
+                                }
+                            }
+                        }
                     }
                     if let Some(pos) = cursor_target {
                         self.textarea.set_cursor(pos);
@@ -508,6 +525,10 @@ impl ChatComposer {
                     return (InputResult::Submitted(expanded), true);
                 }
 
+                // Ensure popup filtering/selection reflects the latest composer text
+                // before consuming Enter on a selected item (mirrors Tab behavior).
+                popup.on_composer_text_change(first_line.to_string());
+
                 if let Some(sel) = popup.selected_item() {
                     match sel {
                         CommandItem::Builtin(cmd) => {
@@ -532,6 +553,21 @@ impl ChatComposer {
                                         return (InputResult::None, true);
                                     }
                                 }
+                            }
+                            return (InputResult::None, true);
+                        }
+                        CommandItem::Task(i) => {
+                            if let Some((name, _desc, _content)) = popup.task(i) {
+                                let starts_with_cmd =
+                                    first_line.trim_start().starts_with(&format!("/{}", name));
+                                if !starts_with_cmd {
+                                    self.textarea.set_text(&format!("/{} ", name));
+                                }
+                                if !self.textarea.text().is_empty() {
+                                    let pos = self.textarea.text().len();
+                                    self.textarea.set_cursor(pos);
+                                }
+                                return (InputResult::None, true);
                             }
                             return (InputResult::None, true);
                         }
@@ -988,6 +1024,31 @@ impl ChatComposer {
                 };
                 if let Some(expanded) = expanded_prompt {
                     text = expanded;
+                } else {
+                    // Detect bare "/taskname ..." and expand to user_instructions + user_message.
+                    if let Some((name, rest)) = parse_slash_name(&text) {
+                        // Only treat as task when not using prompts prefix.
+                        if !name.starts_with(&format!("{PROMPTS_CMD_PREFIX}:")) {
+                            if let Some((_n, _d, content)) =
+                                self.custom_tasks.iter().find(|(n, _, _)| n == name)
+                            {
+                                let user_tail = rest.trim();
+                                let mut out = format!(
+                                    "{open}{task}{close}",
+                                    open = USER_INSTRUCTIONS_OPEN_TAG,
+                                    task = content,
+                                    close = USER_INSTRUCTIONS_CLOSE_TAG,
+                                );
+                                if !user_tail.is_empty() {
+                                    out.push('\n');
+                                    out.push_str("<user_message>");
+                                    out.push_str(user_tail);
+                                    out.push_str("</user_message>");
+                                }
+                                text = out;
+                            }
+                        }
+                    }
                 }
                 if text.is_empty() && !has_attachments {
                     return (InputResult::None, true);
@@ -1402,7 +1463,8 @@ impl ChatComposer {
             }
             _ => {
                 if is_editing_slash_command_name {
-                    let mut command_popup = CommandPopup::new(self.custom_prompts.clone());
+                    let mut command_popup =
+                        CommandPopup::new(self.custom_prompts.clone(), self.custom_tasks.clone());
                     command_popup.on_composer_text_change(first_line.to_string());
                     self.active_popup = ActivePopup::Command(command_popup);
                 }
@@ -1414,6 +1476,13 @@ impl ChatComposer {
         self.custom_prompts = prompts.clone();
         if let ActivePopup::Command(popup) = &mut self.active_popup {
             popup.set_prompts(prompts);
+        }
+    }
+
+    pub(crate) fn set_custom_tasks(&mut self, tasks: Vec<(String, Option<String>, String)>) {
+        self.custom_tasks = tasks.clone();
+        if let ActivePopup::Command(popup) = &mut self.active_popup {
+            popup.set_tasks(tasks);
         }
     }
 

@@ -381,6 +381,12 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    /// Update custom tasks (from .codex/tasks.yaml) for the slash popup.
+    pub(crate) fn set_custom_tasks(&mut self, tasks: Vec<(String, Option<String>, String)>) {
+        self.composer.set_custom_tasks(tasks);
+        self.request_redraw();
+    }
+
     pub(crate) fn composer_is_empty(&self) -> bool {
         self.composer.is_empty()
     }

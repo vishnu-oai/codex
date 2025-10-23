@@ -23,6 +23,22 @@ pub struct Task {
 }
 
 pub fn tasks_file_path(cwd: &Path) -> PathBuf {
+    // Walk up to the repo root (directory containing .git) if present; otherwise use cwd.
+    let mut cursor = cwd.to_path_buf();
+    let mut candidate = cursor.join(".codex").join("tasks.yaml");
+    while let Some(parent) = cursor.parent() {
+        if candidate.exists() {
+            return candidate;
+        }
+        let git_marker = cursor.join(".git");
+        if git_marker.exists() {
+            // Prefer tasks.yaml in repo root .codex even if not present in subdir.
+            return cursor.join(".codex").join("tasks.yaml");
+        }
+        cursor = parent.to_path_buf();
+        candidate = cursor.join(".codex").join("tasks.yaml");
+    }
+    // Fallback: current directory
     cwd.join(".codex").join("tasks.yaml")
 }
 
@@ -144,5 +160,3 @@ pub fn get_task_prompt(cwd: &Path, name: &str) -> Result<Option<String>> {
     }
     Ok(None)
 }
-
-

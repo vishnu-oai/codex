@@ -199,6 +199,7 @@ impl ListSelectionView {
                         match_indices: None,
                         is_current: item.is_current,
                         description: item.description.clone(),
+                        name_color: None,
                     }
                 })
             })

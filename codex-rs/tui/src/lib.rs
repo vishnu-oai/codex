@@ -17,12 +17,12 @@ use codex_core::config::ConfigToml;
 use codex_core::config::find_codex_home;
 use codex_core::config::load_config_as_toml_with_cli_overrides;
 use codex_core::find_conversation_path_by_id_str;
-use codex_protocol::protocol::USER_INSTRUCTIONS_CLOSE_TAG;
-use codex_protocol::protocol::USER_INSTRUCTIONS_OPEN_TAG;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_ollama::DEFAULT_OSS_MODEL;
 use codex_protocol::config_types::SandboxMode;
+use codex_protocol::protocol::USER_INSTRUCTIONS_CLOSE_TAG;
+use codex_protocol::protocol::USER_INSTRUCTIONS_OPEN_TAG;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
@@ -464,15 +464,13 @@ async fn run_ratatui_app(
                 let remaining = parts.next().unwrap_or("");
                 let cwd = config.cwd.clone();
                 match crate::tasks::get_task_prompt(&cwd, task_name) {
-                    Ok(Some(task_text)) => {
-                        Some(format!(
-                            "{remaining}\n\n{open}\n{task}\n{close}",
-                            remaining = remaining.trim(),
-                            open = USER_INSTRUCTIONS_OPEN_TAG,
-                            task = task_text,
-                            close = USER_INSTRUCTIONS_CLOSE_TAG,
-                        ))
-                    }
+                    Ok(Some(task_text)) => Some(format!(
+                        "{remaining}\n\n{open}\n{task}\n{close}",
+                        remaining = remaining.trim(),
+                        open = USER_INSTRUCTIONS_OPEN_TAG,
+                        task = task_text,
+                        close = USER_INSTRUCTIONS_CLOSE_TAG,
+                    )),
                     _ => Some(p.clone()),
                 }
             } else {

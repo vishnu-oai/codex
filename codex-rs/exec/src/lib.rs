@@ -80,7 +80,9 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     // Handle `codex-exec tasks ...` management commands early and exit.
     if let Some(ExecCommand::Tasks(tasks_cmd)) = &command {
         use crate::tasks as taskio;
-        let cwd_path = cwd.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let cwd_path = cwd
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         match &tasks_cmd.sub {
             crate::cli::TasksSubcommand::Init => {
                 let path = taskio::init_tasks_file(&cwd_path)?;
@@ -122,7 +124,8 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
                 file,
                 description,
             } => {
-                let abs = taskio::add_or_update_task_file(&cwd_path, name, file, description.clone())?;
+                let abs =
+                    taskio::add_or_update_task_file(&cwd_path, name, file, description.clone())?;
                 println!("Saved task file: {} -> {}", name, abs.display());
             }
         }
@@ -174,7 +177,9 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
 
     // If a task was specified, append its prompt wrapped in user_instructions tags.
     if let Some(name) = &task_name {
-        let cwd_path = cwd.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let cwd_path = cwd
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         match tasks::get_task_prompt(&cwd_path, name)? {
             Some(task_text) => {
                 prompt = format!(
@@ -199,7 +204,9 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         let task_name = parts.next().unwrap_or("");
         if !task_name.is_empty() {
             let remaining = parts.next().unwrap_or("");
-            let cwdp = cwd.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let cwdp = cwd
+                .clone()
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
             if let Some(task_text) = tasks::get_task_prompt(&cwdp, task_name)? {
                 prompt = format!(
                     "{remaining}\n\n{open}\n{task}\n{close}",

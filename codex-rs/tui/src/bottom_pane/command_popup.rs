@@ -13,6 +13,7 @@ use crate::slash_command::built_in_slash_commands;
 use codex_common::fuzzy_match::fuzzy_match;
 use codex_protocol::custom_prompts::CustomPrompt;
 use codex_protocol::custom_prompts::PROMPTS_CMD_PREFIX;
+use ratatui::style::Color;
 use std::collections::HashSet;
 
 /// A selectable item in the popup: either a built-in command or a user prompt.
@@ -21,17 +22,24 @@ pub(crate) enum CommandItem {
     Builtin(SlashCommand),
     // Index into `prompts`
     UserPrompt(usize),
+    // Index into `tasks`
+    Task(usize),
 }
 
 pub(crate) struct CommandPopup {
     command_filter: String,
     builtins: Vec<(&'static str, SlashCommand)>,
     prompts: Vec<CustomPrompt>,
+    // (name, description, content)
+    tasks: Vec<(String, Option<String>, String)>,
     state: ScrollState,
 }
 
 impl CommandPopup {
-    pub(crate) fn new(mut prompts: Vec<CustomPrompt>) -> Self {
+    pub(crate) fn new(
+        mut prompts: Vec<CustomPrompt>,
+        tasks: Vec<(String, Option<String>, String)>,
+    ) -> Self {
         let builtins = built_in_slash_commands();
         // Exclude prompts that collide with builtin command names and sort by name.
         let exclude: HashSet<String> = builtins.iter().map(|(n, _)| (*n).to_string()).collect();
@@ -41,6 +49,7 @@ impl CommandPopup {
             command_filter: String::new(),
             builtins,
             prompts,
+            tasks,
             state: ScrollState::new(),
         }
     }
@@ -56,8 +65,16 @@ impl CommandPopup {
         self.prompts = prompts;
     }
 
+    pub(crate) fn set_tasks(&mut self, tasks: Vec<(String, Option<String>, String)>) {
+        self.tasks = tasks;
+    }
+
     pub(crate) fn prompt(&self, idx: usize) -> Option<&CustomPrompt> {
         self.prompts.get(idx)
+    }
+
+    pub(crate) fn task(&self, idx: usize) -> Option<&(String, Option<String>, String)> {
+        self.tasks.get(idx)
     }
 
     /// Update the filter string based on the current composer text. The text
@@ -115,6 +132,10 @@ impl CommandPopup {
             for idx in 0..self.prompts.len() {
                 out.push((CommandItem::UserPrompt(idx), None, 0));
             }
+            // Then tasks, sorted by name by provider.
+            for idx in 0..self.tasks.len() {
+                out.push((CommandItem::Task(idx), None, 0));
+            }
             return out;
         }
 
@@ -132,16 +153,24 @@ impl CommandPopup {
                 out.push((CommandItem::UserPrompt(idx), Some(indices), score));
             }
         }
+        // Tasks are matched directly by name (invoked as "/<name>").
+        for (idx, (name, _desc, _content)) in self.tasks.iter().enumerate() {
+            if let Some((indices, score)) = fuzzy_match(name, filter) {
+                out.push((CommandItem::Task(idx), Some(indices), score));
+            }
+        }
         // When filtering, sort by ascending score and then by name for stability.
         out.sort_by(|a, b| {
             a.2.cmp(&b.2).then_with(|| {
                 let an = match a.0 {
                     CommandItem::Builtin(c) => c.command(),
                     CommandItem::UserPrompt(i) => &self.prompts[i].name,
+                    CommandItem::Task(i) => &self.tasks[i].0,
                 };
                 let bn = match b.0 {
                     CommandItem::Builtin(c) => c.command(),
                     CommandItem::UserPrompt(i) => &self.prompts[i].name,
+                    CommandItem::Task(i) => &self.tasks[i].0,
                 };
                 an.cmp(bn)
             })
@@ -160,13 +189,24 @@ impl CommandPopup {
         matches
             .into_iter()
             .map(|(item, indices, _)| {
-                let (name, description) = match item {
-                    CommandItem::Builtin(cmd) => {
-                        (format!("/{}", cmd.command()), cmd.description().to_string())
-                    }
+                let (name, description, name_color) = match item {
+                    CommandItem::Builtin(cmd) => (
+                        format!("/{}", cmd.command()),
+                        cmd.description().to_string(),
+                        None,
+                    ),
                     CommandItem::UserPrompt(i) => (
                         format!("/{PROMPTS_CMD_PREFIX}:{}", self.prompts[i].name),
                         "send saved prompt".to_string(),
+                        None,
+                    ),
+                    CommandItem::Task(i) => (
+                        format!("/{}", self.tasks[i].0),
+                        self.tasks[i]
+                            .1
+                            .clone()
+                            .unwrap_or_else(|| "run custom task".to_string()),
+                        Some(Color::Magenta),
                     ),
                 };
                 GenericDisplayRow {
@@ -175,6 +215,7 @@ impl CommandPopup {
                     is_current: false,
                     display_shortcut: None,
                     description: Some(description),
+                    name_color,
                 }
             })
             .collect()
