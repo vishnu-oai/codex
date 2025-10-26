@@ -218,6 +218,9 @@ pub struct Config {
 
     /// True when Windows WSL onboarding prompt has been acknowledged.
     pub windows_wsl_setup_acknowledged: bool,
+
+    /// Absolute directories where writes are always allowed without approval/sandbox.
+    pub whitelisted_write_dirs: Vec<PathBuf>,
 }
 
 impl Config {
@@ -329,9 +332,19 @@ pub fn load_config_as_toml(codex_home: &Path) -> std::io::Result<TomlValue> {
 /// Returns an empty TOML table when the file does not exist.
 fn load_project_overrides_as_toml(project_root: &Path) -> std::io::Result<TomlValue> {
     let overrides_path = project_root.join(".codex").join("config-overrides.toml");
+    tracing::debug!(
+        "config: looking for project overrides at {}",
+        overrides_path.display()
+    );
     match std::fs::read_to_string(&overrides_path) {
         Ok(contents) => match toml::from_str::<TomlValue>(&contents) {
-            Ok(val) => Ok(val),
+            Ok(val) => {
+                tracing::info!(
+                    path = %overrides_path.display(),
+                    "config: loaded project overrides"
+                );
+                Ok(val)
+            }
             Err(e) => {
                 tracing::error!(
                     "Failed to parse config-overrides.toml ({}): {e}",
@@ -341,6 +354,10 @@ fn load_project_overrides_as_toml(project_root: &Path) -> std::io::Result<TomlVa
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(
+                path = %overrides_path.display(),
+                "config: project overrides not found"
+            );
             Ok(TomlValue::Table(Default::default()))
         }
         Err(e) => Err(e),
@@ -857,6 +874,9 @@ pub struct ConfigToml {
 
     /// Track whether Windows WSL onboarding prompt has been acknowledged.
     pub windows_wsl_setup_acknowledged: Option<bool>,
+
+    /// Absolute directories where writes are always allowed without approval/sandbox.
+    pub whitelisted_write_dirs: Option<Vec<PathBuf>>,
 }
 
 impl From<ConfigToml> for UserSavedConfig {
@@ -920,13 +940,31 @@ impl ConfigToml {
                     network_access,
                     exclude_tmpdir_env_var,
                     exclude_slash_tmp,
-                }) => SandboxPolicy::WorkspaceWrite {
-                    writable_roots: writable_roots.clone(),
-                    network_access: *network_access,
-                    exclude_tmpdir_env_var: *exclude_tmpdir_env_var,
-                    exclude_slash_tmp: *exclude_slash_tmp,
-                },
-                None => SandboxPolicy::new_workspace_write_policy(),
+                }) => {
+                    let mut roots = writable_roots.clone();
+                    if let Some(extra) = &self.whitelisted_write_dirs {
+                        roots.extend(extra.clone());
+                    }
+                    SandboxPolicy::WorkspaceWrite {
+                        writable_roots: roots,
+                        network_access: *network_access,
+                        exclude_tmpdir_env_var: *exclude_tmpdir_env_var,
+                        exclude_slash_tmp: *exclude_slash_tmp,
+                    }
+                }
+                None => {
+                    let roots = self
+                        .whitelisted_write_dirs
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or_default();
+                    SandboxPolicy::WorkspaceWrite {
+                        writable_roots: roots,
+                        network_access: false,
+                        exclude_tmpdir_env_var: false,
+                        exclude_slash_tmp: false,
+                    }
+                }
             },
             SandboxMode::DangerFullAccess => SandboxPolicy::DangerFullAccess,
         }
@@ -1154,6 +1192,28 @@ impl Config {
             .or(cfg.review_model)
             .unwrap_or_else(default_review_model);
 
+        // Validate/normalize whitelisted write directories: absolute paths only.
+        let whitelisted_write_dirs: Vec<PathBuf> = cfg
+            .whitelisted_write_dirs
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| {
+                if !p.is_absolute() {
+                    tracing::warn!(path = %p.display(), "ignoring non-absolute path in whitelisted_write_dirs");
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        tracing::debug!(
+            count = %whitelisted_write_dirs.len(),
+            dirs = ?whitelisted_write_dirs,
+            "config: whitelisted_write_dirs loaded"
+        );
+
         let config = Self {
             model,
             review_model,
@@ -1225,6 +1285,7 @@ impl Config {
                 .mcp_oauth_credentials_store_mode
                 .unwrap_or_default(),
             windows_wsl_setup_acknowledged: cfg.windows_wsl_setup_acknowledged.unwrap_or(false),
+            whitelisted_write_dirs,
         };
         Ok(config)
     }

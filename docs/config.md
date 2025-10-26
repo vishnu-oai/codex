@@ -335,6 +335,23 @@ writable_roots = ["/Users/YOU/.pyenv/shims"]
 network_access = false
 ```
 
+### whitelisted_write_dirs
+
+You can declare absolute directories where write operations should proceed without prompting for approval. These directories are also added to the sandbox writable roots when using `workspace-write` so commands can modify files there without escalation.
+
+```toml
+# Writes under these absolute directories proceed without approval.
+whitelisted_write_dirs = [
+  "/Users/YOU/dev/build-output",
+  "/var/tmp/codex-cache",
+]
+```
+
+Notes:
+- Paths must be absolute. Relative entries are ignored.
+- For code edits via the `apply_patch` tool, patches that only touch files inside the whitelist are applied directly (no approval, no sandbox).
+- For shell commands, Codex does not attempt to predict writes; the OS sandbox enforces access. Whitelisted directories are writable inside the sandbox; writes elsewhere are blocked.
+
 To disable sandboxing altogether, specify `danger-full-access` like so:
 
 ```toml

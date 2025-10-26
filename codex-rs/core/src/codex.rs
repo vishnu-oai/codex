@@ -474,6 +474,7 @@ impl Session {
                 turn_context.sandbox_policy.clone(),
                 turn_context.cwd.clone(),
                 config.codex_linux_sandbox_exe.clone(),
+                config.whitelisted_write_dirs.clone(),
             )),
         };
 
@@ -2779,6 +2780,7 @@ mod tests {
                 turn_context.sandbox_policy.clone(),
                 turn_context.cwd.clone(),
                 None,
+                config.whitelisted_write_dirs.clone(),
             )),
         };
         let session = Session {
@@ -2852,6 +2854,7 @@ mod tests {
                 config.sandbox_policy.clone(),
                 config.cwd.clone(),
                 None,
+                config.whitelisted_write_dirs.clone(),
             )),
         };
         let session = Arc::new(Session {

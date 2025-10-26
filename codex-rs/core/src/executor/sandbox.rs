@@ -1,5 +1,6 @@
 use crate::apply_patch::ApplyPatchExec;
 use crate::codex::Session;
+use crate::command_safety::is_dangerous_command::command_might_be_dangerous;
 use crate::exec::SandboxType;
 use crate::executor::ExecutionMode;
 use crate::executor::ExecutionRequest;
@@ -8,6 +9,9 @@ use crate::executor::errors::ExecError;
 use crate::safety::SafetyCheck;
 use crate::safety::assess_command_safety;
 use crate::safety::assess_patch_safety;
+use crate::safety::get_platform_sandbox;
+use codex_apply_patch::ApplyPatchAction;
+use codex_apply_patch::ApplyPatchFileChange;
 use codex_otel::otel_event_manager::OtelEventManager;
 use codex_otel::otel_event_manager::ToolDecisionSource;
 use codex_protocol::protocol::AskForApproval;
@@ -100,6 +104,125 @@ async fn select_shell_sandbox(
         request.approval_command.clone()
     };
 
+    tracing::debug!(
+        cwd = %request.params.cwd.display(),
+        command = ?command_for_safety,
+        approval_policy = ?approval_policy,
+        whitelist_count = %config.whitelisted_write_dirs.len(),
+        "select_shell_sandbox: entry"
+    );
+
+    // Optional fast‑path: when operating inside a whitelisted directory and the command
+    // is not flagged dangerous, bypass sandbox and approvals entirely.
+    let cwd_in_whitelist = config
+        .whitelisted_write_dirs
+        .iter()
+        .any(|root| request.params.cwd.starts_with(root));
+
+    tracing::debug!(
+        cwd = %request.params.cwd.display(),
+        cwd_in_whitelist,
+        whitelist = ?config.whitelisted_write_dirs,
+        "exec whitelist: cwd check"
+    );
+
+    // Also allow when any path-like token in the command lies under a whitelisted root.
+    // Heuristic: treat tokens that are absolute paths OR contain a '/'
+    // (including ./, ../) as path-like; resolve relative paths against cwd and
+    // check prefix.
+    let cmd_refs_whitelisted_path = {
+        use std::path::Component;
+        use std::path::Path;
+        use std::path::PathBuf;
+
+        fn normalize(path: &Path) -> PathBuf {
+            let mut out = PathBuf::new();
+            for comp in path.components() {
+                match comp {
+                    Component::ParentDir => {
+                        out.pop();
+                    }
+                    Component::CurDir => {}
+                    other => out.push(other.as_os_str()),
+                }
+            }
+            out
+        }
+
+        command_for_safety.iter().any(|tok| {
+            // Skip obvious flags
+            if tok.starts_with('-') {
+                return false;
+            }
+            let raw = Path::new(tok);
+            let is_path_like = raw.is_absolute() || tok.contains('/');
+            if !is_path_like {
+                return false;
+            }
+            let abs = if raw.is_absolute() {
+                raw.to_path_buf()
+            } else {
+                normalize(&request.params.cwd.join(raw))
+            };
+            let in_whitelist = config
+                .whitelisted_write_dirs
+                .iter()
+                .any(|root| abs.starts_with(root));
+            tracing::debug!(
+                token = %tok,
+                resolved = %abs.display(),
+                is_path_like,
+                in_whitelist,
+                "exec whitelist: token check"
+            );
+            in_whitelist
+        })
+    };
+
+    tracing::debug!(cmd_refs_whitelisted_path, "exec whitelist: argv path match");
+
+    let is_dangerous = command_might_be_dangerous(&command_for_safety);
+    tracing::debug!(is_dangerous, "exec dangerous check");
+
+    if !is_dangerous && (cwd_in_whitelist || cmd_refs_whitelisted_path) {
+        otel_event_manager.tool_decision(
+            "local_shell",
+            call_id,
+            ReviewDecision::Approved,
+            ToolDecisionSource::Config,
+        );
+        tracing::info!(
+            cwd_in_whitelist,
+            cmd_refs_whitelisted_path,
+            "exec whitelist: bypassing sandbox and approval"
+        );
+        return Ok(SandboxDecision::user_override(false));
+    }
+
+    // If the model asked to escalate (run unsandboxed) but we have whitelisted dirs, prefer
+    // running inside the platform sandbox first without prompting. This avoids pre-run approval
+    // while still allowing writes inside whitelisted roots (already included in writable_roots).
+    if request.params.with_escalated_permissions.unwrap_or(false) && !is_dangerous {
+        if let Some(sandbox_type) = get_platform_sandbox() {
+            let decision = SandboxDecision::auto(
+                sandbox_type,
+                should_escalate_on_failure(approval_policy, sandbox_type),
+            );
+            otel_event_manager.tool_decision(
+                "local_shell",
+                call_id,
+                ReviewDecision::Approved,
+                ToolDecisionSource::Config,
+            );
+            tracing::info!(
+                sandbox = ?sandbox_type,
+                "exec whitelist: model requested escalation; running sandbox-first without prompt"
+            );
+            return Ok(decision);
+        }
+    }
+
+    tracing::debug!("exec whitelist: falling back to assess_command_safety");
     let safety = assess_command_safety(
         &command_for_safety,
         approval_policy,
@@ -165,6 +288,15 @@ fn select_apply_patch_sandbox(
     approval_policy: AskForApproval,
     config: &ExecutorConfig,
 ) -> Result<SandboxDecision, ExecError> {
+    // If the patch is fully constrained to whitelisted directories, bypass approval+sandbox.
+    if is_patch_constrained_to_whitelist(
+        &exec.action,
+        &config.sandbox_cwd,
+        &config.whitelisted_write_dirs,
+    ) {
+        tracing::info!("apply_patch whitelist: bypassing sandbox and approval");
+        return Ok(SandboxDecision::user_override(false));
+    }
     if exec.user_explicitly_approved_this_action {
         return Ok(SandboxDecision::user_override(false));
     }
@@ -188,6 +320,72 @@ fn select_apply_patch_sandbox(
     }
 }
 
+fn is_patch_constrained_to_whitelist(
+    action: &ApplyPatchAction,
+    cwd: &std::path::Path,
+    whitelisted_roots: &[std::path::PathBuf],
+) -> bool {
+    if whitelisted_roots.is_empty() {
+        return false;
+    }
+
+    use std::path::Component;
+    use std::path::Path;
+    use std::path::PathBuf;
+
+    fn normalize(path: &Path) -> PathBuf {
+        let mut out = PathBuf::new();
+        for comp in path.components() {
+            match comp {
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::CurDir => {}
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    }
+
+    let path_in = |p: &Path| {
+        let abs = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            cwd.join(p)
+        };
+        let abs = normalize(&abs);
+        let in_whitelist = whitelisted_roots.iter().any(|root| abs.starts_with(root));
+        tracing::debug!(
+            path = %p.display(),
+            resolved = %abs.display(),
+            in_whitelist,
+            "apply_patch whitelist: path check"
+        );
+        in_whitelist
+    };
+
+    for (path, change) in action.changes() {
+        match change {
+            ApplyPatchFileChange::Add { .. } | ApplyPatchFileChange::Delete { .. } => {
+                if !path_in(path) {
+                    return false;
+                }
+            }
+            ApplyPatchFileChange::Update { move_path, .. } => {
+                if !path_in(path) {
+                    return false;
+                }
+                if let Some(dest) = move_path {
+                    if !path_in(dest) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,7 +406,12 @@ mod tests {
             action,
             user_explicitly_approved_this_action: true,
         };
-        let cfg = ExecutorConfig::new(SandboxPolicy::ReadOnly, std::env::temp_dir(), None);
+        let cfg = ExecutorConfig::new(
+            SandboxPolicy::ReadOnly,
+            std::env::temp_dir(),
+            None,
+            Vec::new(),
+        );
         let request = ExecutionRequest {
             params: ExecParams {
                 command: vec!["apply_patch".into()],
@@ -251,7 +454,12 @@ mod tests {
             action,
             user_explicitly_approved_this_action: false,
         };
-        let cfg = ExecutorConfig::new(SandboxPolicy::DangerFullAccess, std::env::temp_dir(), None);
+        let cfg = ExecutorConfig::new(
+            SandboxPolicy::DangerFullAccess,
+            std::env::temp_dir(),
+            None,
+            Vec::new(),
+        );
         let request = ExecutionRequest {
             params: ExecParams {
                 command: vec!["apply_patch".into()],
@@ -295,7 +503,12 @@ mod tests {
             action,
             user_explicitly_approved_this_action: false,
         };
-        let cfg = ExecutorConfig::new(SandboxPolicy::ReadOnly, std::env::temp_dir(), None);
+        let cfg = ExecutorConfig::new(
+            SandboxPolicy::ReadOnly,
+            std::env::temp_dir(),
+            None,
+            Vec::new(),
+        );
         let request = ExecutionRequest {
             params: ExecParams {
                 command: vec!["apply_patch".into()],
@@ -332,9 +545,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn select_apply_patch_bypasses_when_within_whitelist() {
+        let (session, ctx) = make_session_and_context();
+        let tmp = tempfile::tempdir().expect("tmp");
+        let p = tmp.path().join("whitelisted.txt");
+        let action = ApplyPatchAction::new_add_for_test(&p, "hi".to_string());
+        let exec = ApplyPatchExec {
+            action,
+            user_explicitly_approved_this_action: false,
+        };
+        let cfg = ExecutorConfig::new(
+            SandboxPolicy::ReadOnly,
+            std::env::temp_dir(),
+            None,
+            vec![tmp.path().to_path_buf()],
+        );
+        let request = ExecutionRequest {
+            params: ExecParams {
+                command: vec!["apply_patch".into()],
+                cwd: std::env::temp_dir(),
+                timeout_ms: None,
+                env: std::collections::HashMap::new(),
+                with_escalated_permissions: None,
+                justification: None,
+            },
+            approval_command: vec!["apply_patch".into()],
+            mode: ExecutionMode::ApplyPatch(exec),
+            stdout_stream: None,
+            use_shell_profile: false,
+        };
+        let otel_event_manager = ctx.client.get_otel_event_manager();
+        let decision = select_sandbox(
+            &request,
+            AskForApproval::OnRequest,
+            Default::default(),
+            &cfg,
+            &session,
+            "sub",
+            "call",
+            &otel_event_manager,
+        )
+        .await
+        .expect("ok");
+
+        assert_eq!(decision.initial_sandbox, SandboxType::None);
+        assert_eq!(decision.escalate_on_failure, false);
+    }
+
+    #[tokio::test]
     async fn select_shell_autoapprove_in_danger_mode() {
         let (session, ctx) = make_session_and_context();
-        let cfg = ExecutorConfig::new(SandboxPolicy::DangerFullAccess, std::env::temp_dir(), None);
+        let cfg = ExecutorConfig::new(
+            SandboxPolicy::DangerFullAccess,
+            std::env::temp_dir(),
+            None,
+            Vec::new(),
+        );
         let request = ExecutionRequest {
             params: ExecParams {
                 command: vec!["some-unknown".into()],
@@ -370,7 +636,12 @@ mod tests {
     #[tokio::test]
     async fn select_shell_escalates_on_failure_with_platform_sandbox() {
         let (session, ctx) = make_session_and_context();
-        let cfg = ExecutorConfig::new(SandboxPolicy::ReadOnly, std::env::temp_dir(), None);
+        let cfg = ExecutorConfig::new(
+            SandboxPolicy::ReadOnly,
+            std::env::temp_dir(),
+            None,
+            Vec::new(),
+        );
         let request = ExecutionRequest {
             params: ExecParams {
                 // Unknown command => untrusted but not flagged dangerous

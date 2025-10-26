@@ -31,6 +31,7 @@ pub(crate) struct ExecutorConfig {
     pub(crate) sandbox_policy: SandboxPolicy,
     pub(crate) sandbox_cwd: PathBuf,
     codex_linux_sandbox_exe: Option<PathBuf>,
+    pub(crate) whitelisted_write_dirs: Vec<PathBuf>,
 }
 
 impl ExecutorConfig {
@@ -38,11 +39,13 @@ impl ExecutorConfig {
         sandbox_policy: SandboxPolicy,
         sandbox_cwd: PathBuf,
         codex_linux_sandbox_exe: Option<PathBuf>,
+        whitelisted_write_dirs: Vec<PathBuf>,
     ) -> Self {
         Self {
             sandbox_policy,
             sandbox_cwd,
             codex_linux_sandbox_exe,
+            whitelisted_write_dirs,
         }
     }
 }
