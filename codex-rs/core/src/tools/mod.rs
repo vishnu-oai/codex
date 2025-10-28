@@ -49,7 +49,7 @@ pub(crate) const TELEMETRY_PREVIEW_TRUNCATION_NOTICE: &str =
 // TODO(jif) break this down
 pub(crate) async fn handle_container_exec_with_params(
     tool_name: &str,
-    params: ExecParams,
+    mut params: ExecParams,
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
     turn_diff_tracker: SharedTurnDiffTracker,
@@ -99,6 +99,13 @@ pub(crate) async fn handle_container_exec_with_params(
         }
         MaybeApplyPatchVerified::NotApplyPatch => None,
     };
+
+    // Apply configured default timeout when the tool call omitted one.
+    if params.timeout_ms.is_none() {
+        if let Some(default_ms) = turn_context.default_shell_timeout_ms {
+            params.timeout_ms = Some(default_ms);
+        }
+    }
 
     let command_for_display = if let Some(exec) = apply_patch_exec.as_ref() {
         vec!["apply_patch".to_string(), exec.action.patch.clone()]

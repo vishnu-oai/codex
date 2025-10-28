@@ -362,24 +362,38 @@ async fn consume_truncated_output(
         Some(agg_tx.clone()),
     ));
 
-    let (exit_status, timed_out) = tokio::select! {
-        result = tokio::time::timeout(timeout, child.wait()) => {
-            match result {
-                Ok(status_result) => {
-                    let exit_status = status_result?;
-                    (exit_status, false)
-                }
-                Err(_) => {
-                    // timeout
-                    child.start_kill()?;
-                    // Debatable whether `child.wait().await` should be called here.
-                    (synthetic_exit_status(EXIT_CODE_SIGNAL_BASE + TIMEOUT_CODE), true)
-                }
+    let (exit_status, timed_out) = if timeout.is_zero() {
+        // Unlimited timeout: wait without a timer, still allow Ctrl-C to interrupt.
+        tokio::select! {
+            status_result = child.wait() => {
+                let exit_status = status_result?;
+                (exit_status, false)
+            }
+            _ = tokio::signal::ctrl_c() => {
+                child.start_kill()?;
+                (synthetic_exit_status(EXIT_CODE_SIGNAL_BASE + SIGKILL_CODE), false)
             }
         }
-        _ = tokio::signal::ctrl_c() => {
-            child.start_kill()?;
-            (synthetic_exit_status(EXIT_CODE_SIGNAL_BASE + SIGKILL_CODE), false)
+    } else {
+        tokio::select! {
+            result = tokio::time::timeout(timeout, child.wait()) => {
+                match result {
+                    Ok(status_result) => {
+                        let exit_status = status_result?;
+                        (exit_status, false)
+                    }
+                    Err(_) => {
+                        // timeout
+                        child.start_kill()?;
+                        // Debatable whether `child.wait().await` should be called here.
+                        (synthetic_exit_status(EXIT_CODE_SIGNAL_BASE + TIMEOUT_CODE), true)
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                child.start_kill()?;
+                (synthetic_exit_status(EXIT_CODE_SIGNAL_BASE + SIGKILL_CODE), false)
+            }
         }
     };
 
