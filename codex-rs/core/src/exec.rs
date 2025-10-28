@@ -144,12 +144,14 @@ pub async fn process_exec_tool_call(
             let mut timed_out = raw_output.timed_out;
 
             #[cfg(target_family = "unix")]
+            let mut terminated_signal: Option<i32> = None;
+            #[cfg(target_family = "unix")]
             {
                 if let Some(signal) = raw_output.exit_status.signal() {
                     if signal == TIMEOUT_CODE {
                         timed_out = true;
                     } else {
-                        return Err(CodexErr::Sandbox(SandboxErr::Signal(signal)));
+                        terminated_signal = Some(signal);
                     }
                 }
             }
@@ -173,6 +175,14 @@ pub async fn process_exec_tool_call(
 
             if timed_out {
                 return Err(CodexErr::Sandbox(SandboxErr::Timeout {
+                    output: Box::new(exec_output),
+                }));
+            }
+
+            #[cfg(target_family = "unix")]
+            if let Some(signal) = terminated_signal {
+                return Err(CodexErr::Sandbox(SandboxErr::Signal {
+                    signal,
                     output: Box::new(exec_output),
                 }));
             }

@@ -41,7 +41,10 @@ pub enum SandboxErr {
 
     /// Command was killed by a signal
     #[error("command was killed by a signal")]
-    Signal(i32),
+    Signal {
+        signal: i32,
+        output: Box<ExecToolCallOutput>,
+    },
 
     /// Error from linux landlock
     #[error("Landlock was not able to fully enforce all sandbox rules")]
@@ -333,6 +336,21 @@ pub fn get_error_message_ui(e: &CodexErr) -> String {
                 "error: command timed out after {} ms",
                 output.duration.as_millis()
             )
+        }
+        CodexErr::Sandbox(SandboxErr::Signal { signal, output }) => {
+            let aggregated = output.aggregated_output.text.trim();
+            if !aggregated.is_empty() {
+                output.aggregated_output.text.clone()
+            } else {
+                let stderr = output.stderr.text.trim();
+                let stdout = output.stdout.text.trim();
+                match (stderr.is_empty(), stdout.is_empty()) {
+                    (false, false) => format!("{stderr}\n{stdout}"),
+                    (false, true) => output.stderr.text.clone(),
+                    (true, false) => output.stdout.text.clone(),
+                    (true, true) => format!("command terminated by signal {signal}"),
+                }
+            }
         }
         _ => e.to_string(),
     };
