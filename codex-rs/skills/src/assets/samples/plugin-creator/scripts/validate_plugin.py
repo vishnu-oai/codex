@@ -23,6 +23,23 @@ SEMVER_RE = re.compile(
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
 HEX_COLOR_RE = re.compile(r"^#[0-9A-F]{6}$", re.IGNORECASE)
+SETUP_INPUT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+SETUP_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+MAX_SETUP_COMMAND_COUNT = 32
+MAX_SETUP_INPUT_COUNT = 32
+MAX_SETUP_COMMAND_ARGUMENT_COUNT = 64
+MAX_SETUP_INPUT_ID_BYTES = 64
+MAX_SETUP_ENV_BYTES = 128
+MAX_SETUP_PROMPT_BYTES = 512
+MAX_SETUP_COMMAND_NAME_BYTES = 128
+MAX_SETUP_COMMAND_ARGUMENT_BYTES = 2048
+MAX_SETUP_RENDERED_PLAN_BYTES = 4096
+RESERVED_SETUP_ENV = {
+    "PLUGIN_ROOT",
+    "PLUGIN_DATA",
+    "CLAUDE_PLUGIN_ROOT",
+    "CLAUDE_PLUGIN_DATA",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -106,6 +123,7 @@ def validate_manifest_shape(
         "repository",
         "license",
         "keywords",
+        "setup",
     }
     for key in sorted(set(manifest) - allowed_keys):
         errors.append(f"plugin.json field `{key}` is not accepted by plugin validation")
@@ -127,6 +145,7 @@ def validate_manifest_shape(
     validate_optional_contract_path(manifest, "skills", "skills", errors)
     validate_optional_contract_path(manifest, "apps", ".app.json", errors)
     validate_manifest_mcp_servers(plugin_root, manifest, errors)
+    validate_manifest_setup(manifest, errors)
 
     if manifest.get("apps") is not None:
         validate_app_manifest(
@@ -177,7 +196,9 @@ def validate_manifest_shape(
     if not isinstance(capabilities, list) or not all(
         isinstance(value, str) and value.strip() for value in capabilities
     ):
-        errors.append("plugin.json field `interface.capabilities` must be an array of strings")
+        errors.append(
+            "plugin.json field `interface.capabilities` must be an array of strings"
+        )
     for field in ("websiteURL", "privacyPolicyURL", "termsOfServiceURL"):
         validate_optional_https_url(interface, field, errors, prefix="interface")
     brand_color = interface.get("brandColor")
@@ -199,6 +220,185 @@ def validate_manifest_shape(
                 f"interface.screenshots[{index}]",
                 errors,
             )
+
+
+def validate_manifest_setup(manifest: dict[str, Any], errors: list[str]) -> None:
+    setup = manifest.get("setup")
+    if setup is None:
+        return
+    if not isinstance(setup, dict):
+        errors.append("plugin.json field `setup` must be an object")
+        return
+    reject_unknown_fields(setup, {"inputs", "commands", "command"}, "setup", errors)
+
+    inputs = setup.get("inputs", [])
+    if not isinstance(inputs, list):
+        errors.append("plugin.json field `setup.inputs` must be an array")
+        inputs = []
+    if len(inputs) > MAX_SETUP_INPUT_COUNT:
+        errors.append(
+            f"plugin.json field `setup.inputs` must not contain more than "
+            f"{MAX_SETUP_INPUT_COUNT} inputs"
+        )
+
+    input_ids: set[str] = set()
+    environment_names: set[str] = set()
+    for index, value in enumerate(inputs):
+        prefix = f"setup.inputs[{index}]"
+        if not isinstance(value, dict):
+            errors.append(f"plugin.json field `{prefix}` must be an object")
+            continue
+        reject_unknown_fields(
+            value,
+            {"id", "type", "prompt", "env", "required"},
+            prefix,
+            errors,
+        )
+        input_id = require_non_empty_string(value, "id", errors, prefix=prefix)
+        if input_id is not None:
+            if len(input_id.encode("utf-8")) > MAX_SETUP_INPUT_ID_BYTES:
+                errors.append(
+                    f"plugin.json field `{prefix}.id` must not exceed "
+                    f"{MAX_SETUP_INPUT_ID_BYTES} bytes"
+                )
+            if SETUP_INPUT_ID_RE.fullmatch(input_id) is None:
+                errors.append(
+                    f"plugin.json field `{prefix}.id` must contain only ASCII "
+                    "letters, digits, underscores, or hyphens"
+                )
+            if input_id in input_ids:
+                errors.append(
+                    f"plugin setup input `{input_id}` is declared more than once"
+                )
+            input_ids.add(input_id)
+        input_type = value.get("type")
+        if not isinstance(input_type, str) or input_type not in {
+            "text",
+            "directory",
+            "file",
+            "secret",
+        }:
+            errors.append(
+                f"plugin.json field `{prefix}.type` must be text, directory, file, or secret"
+            )
+        prompt = require_non_empty_string(value, "prompt", errors, prefix=prefix)
+        if prompt is not None and (
+            len(prompt.encode("utf-8")) > MAX_SETUP_PROMPT_BYTES
+            or any(character.isascii() and ord(character) < 32 for character in prompt)
+            or any(127 <= ord(character) <= 159 for character in prompt)
+        ):
+            errors.append(
+                f"plugin.json field `{prefix}.prompt` must be control-free "
+                f"and not exceed {MAX_SETUP_PROMPT_BYTES} bytes"
+            )
+        environment_name = require_non_empty_string(value, "env", errors, prefix=prefix)
+        if environment_name is not None:
+            if len(environment_name.encode("utf-8")) > MAX_SETUP_ENV_BYTES:
+                errors.append(
+                    f"plugin.json field `{prefix}.env` must not exceed "
+                    f"{MAX_SETUP_ENV_BYTES} bytes"
+                )
+            if SETUP_ENV_RE.fullmatch(environment_name) is None:
+                errors.append(
+                    f"plugin.json field `{prefix}.env` must be a valid environment variable"
+                )
+            if environment_name in RESERVED_SETUP_ENV:
+                errors.append(
+                    f"plugin.json field `{prefix}.env` cannot override reserved "
+                    f"environment variable `{environment_name}`"
+                )
+            if environment_name in environment_names:
+                errors.append(
+                    f"plugin setup environment variable `{environment_name}` "
+                    "is declared more than once"
+                )
+            environment_names.add(environment_name)
+        if "required" in value and not isinstance(value["required"], bool):
+            errors.append(f"plugin.json field `{prefix}.required` must be a boolean")
+
+    commands = setup.get("commands", [])
+    if not isinstance(commands, list):
+        errors.append("plugin.json field `setup.commands` must be an array")
+        return
+    legacy_command = setup.get("command")
+    if legacy_command is not None:
+        if commands:
+            errors.append(
+                "plugin setup must declare either command or commands, not both"
+            )
+            return
+        commands = [{"name": "setup", "command": legacy_command}]
+    if not commands:
+        errors.append("plugin setup must declare at least one command")
+        return
+    if len(commands) > MAX_SETUP_COMMAND_COUNT:
+        errors.append(
+            f"plugin.json field `setup.commands` must not contain more than "
+            f"{MAX_SETUP_COMMAND_COUNT} commands"
+        )
+
+    command_names: set[str] = set()
+    rendered_plan_bytes = 0
+    for index, value in enumerate(commands):
+        prefix = f"setup.commands[{index}]"
+        if not isinstance(value, dict):
+            errors.append(f"plugin.json field `{prefix}` must be an object")
+            continue
+        reject_unknown_fields(value, {"name", "command", "interactive"}, prefix, errors)
+        name = require_non_empty_string(value, "name", errors, prefix=prefix)
+        if name is not None:
+            rendered_plan_bytes += len(name.encode("utf-8"))
+            if (
+                len(name.encode("utf-8")) > MAX_SETUP_COMMAND_NAME_BYTES
+                or any(
+                    character.isascii() and ord(character) < 32 for character in name
+                )
+                or any(127 <= ord(character) <= 159 for character in name)
+            ):
+                errors.append(
+                    f"plugin.json field `{prefix}.name` must be control-free "
+                    f"and not exceed {MAX_SETUP_COMMAND_NAME_BYTES} bytes"
+                )
+            if name in command_names:
+                errors.append(
+                    f"plugin setup command `{name}` is declared more than once"
+                )
+            command_names.add(name)
+        command = value.get("command")
+        if (
+            not isinstance(command, list)
+            or not command
+            or len(command) > MAX_SETUP_COMMAND_ARGUMENT_COUNT
+            or not all(
+                isinstance(argument, str)
+                and len(argument.encode("utf-8")) <= MAX_SETUP_COMMAND_ARGUMENT_BYTES
+                and not any(
+                    (character.isascii() and ord(character) < 32)
+                    or 127 <= ord(character) <= 159
+                    for character in argument
+                )
+                for argument in command
+            )
+            or not isinstance(command[0], str)
+            or not command[0].strip()
+        ):
+            errors.append(
+                f"plugin.json field `{prefix}.command` must be an executable "
+                f"followed by at most {MAX_SETUP_COMMAND_ARGUMENT_COUNT - 1} "
+                "NUL-free string arguments"
+            )
+        if "interactive" in value and not isinstance(value["interactive"], bool):
+            errors.append(f"plugin.json field `{prefix}.interactive` must be a boolean")
+        if isinstance(command, list):
+            rendered_plan_bytes += sum(
+                len(argument.encode("utf-8"))
+                for argument in command
+                if isinstance(argument, str)
+            )
+    if rendered_plan_bytes > MAX_SETUP_RENDERED_PLAN_BYTES:
+        errors.append(
+            f"plugin setup command plan must not exceed {MAX_SETUP_RENDERED_PLAN_BYTES} bytes"
+        )
 
 
 def require_object(
@@ -250,7 +450,9 @@ def reject_unknown_fields(
     errors: list[str],
 ) -> None:
     for key in sorted(set(payload) - allowed_keys):
-        errors.append(f"plugin.json field `{prefix}.{key}` is not accepted by plugin validation")
+        errors.append(
+            f"plugin.json field `{prefix}.{key}` is not accepted by plugin validation"
+        )
 
 
 def validate_optional_https_url(
@@ -265,7 +467,9 @@ def validate_optional_https_url(
         return
     parsed = urlparse(value) if isinstance(value, str) else None
     if parsed is None or parsed.scheme != "https" or not parsed.netloc:
-        errors.append(f"plugin.json field `{prefix}.{key}` must be an absolute `https://` URL")
+        errors.append(
+            f"plugin.json field `{prefix}.{key}` must be an absolute `https://` URL"
+        )
 
 
 def validate_optional_contract_path(
@@ -334,9 +538,13 @@ def validate_app_manifest(path: Path, errors: list[str]) -> None:
         )
         app_id = value.get("id")
         if not isinstance(app_id, str) or not app_id.strip():
-            errors.append(f"`.app.json` app `{key}` field `id` must be a non-empty string")
+            errors.append(
+                f"`.app.json` app `{key}` field `id` must be a non-empty string"
+            )
         category = value.get("category")
-        if category is not None and (not isinstance(category, str) or not category.strip()):
+        if category is not None and (
+            not isinstance(category, str) or not category.strip()
+        ):
             errors.append(
                 f"`.app.json` app `{key}` field `category` must be a non-empty string"
             )
@@ -438,7 +646,9 @@ def validate_skill_manifest(skill_root: Path, errors: list[str]) -> None:
         return
     skill_name = frontmatter.get("name")
     if not isinstance(skill_name, str) or not skill_name.strip():
-        errors.append(f"skill `{skill_root.name}` frontmatter field `name` must be non-empty")
+        errors.append(
+            f"skill `{skill_root.name}` frontmatter field `name` must be non-empty"
+        )
     description = frontmatter.get("description")
     if not isinstance(description, str) or not description.strip():
         errors.append(
@@ -488,7 +698,9 @@ def validate_skill_agent_manifest(
     )
     interface = payload.get("interface")
     if not isinstance(interface, dict):
-        errors.append(f"skill `{skill_root.name}` agent field `interface` must be an object")
+        errors.append(
+            f"skill `{skill_root.name}` agent field `interface` must be an object"
+        )
         return
     reject_skill_agent_unknown_fields(
         interface,
@@ -537,7 +749,9 @@ def validate_skill_agent_manifest(
     policy = payload.get("policy")
     if policy is not None:
         if not isinstance(policy, dict):
-            errors.append(f"skill `{skill_root.name}` agent field `policy` must be an object")
+            errors.append(
+                f"skill `{skill_root.name}` agent field `policy` must be an object"
+            )
         else:
             reject_skill_agent_unknown_fields(
                 policy,
@@ -614,7 +828,9 @@ def validate_asset_path(
         errors.append(f"{label} must be a non-empty relative path")
         return
     candidate = PurePosixPath(raw_path.replace("\\", "/"))
-    if candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
+    if candidate.is_absolute() or any(
+        part in {"", ".", ".."} for part in candidate.parts
+    ):
         errors.append(f"{label} must stay inside the plugin archive")
         return
     resolved_path = (base_dir / candidate.as_posix()).resolve()

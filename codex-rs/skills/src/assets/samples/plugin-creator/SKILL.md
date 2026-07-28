@@ -78,6 +78,24 @@ python3 scripts/update_plugin_cachebuster.py <plugin-path>
 Prefer the helper default cachebuster unless the user explicitly asks for a specific override.
 See `references/installing-and-updating.md` for the expected cachebuster and reinstall flow while iterating on an existing local plugin.
 
+## Experimental foreground plugin setup
+
+For a plugin that needs customer-specific file paths, authentication, generated
+configuration, or MCP connection verification, declare an optional
+`setup.inputs` and `setup.commands` block in
+`.codex-plugin/plugin.json`. Follow the complete schema, security constraints,
+interactive behavior, non-interactive examples, and upgrade guidance in
+`references/plugin-json-spec.md`.
+
+Plugin setup is disabled by default. Enable it explicitly with
+`codex features enable plugin_setup`. A foreground `codex plugin add`
+prompts before running the approved plan, and
+`codex plugin setup <plugin>@<marketplace>` reruns setup for an installed
+plugin. Do not claim setup runs in desktop-app installs or background updates.
+
+Run `python3 scripts/validate_plugin.py <plugin-path>` after adding a setup
+block.
+
 ## What this skill creates
 
 - Default marketplace-backed scaffolds use the personal marketplace file at

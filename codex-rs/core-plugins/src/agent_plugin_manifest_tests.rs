@@ -1,6 +1,9 @@
 use super::PluginManifest;
 use super::PluginManifestMcpServers;
+use super::load_plugin_manifest;
 use super::parse_resolved_plugin_manifest;
+use codex_plugin::manifest::PluginManifestSetup;
+use codex_plugin::manifest::PluginManifestSetupCommand;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_plugins::AGENT_PLUGIN_SCHEMA_URI;
 use pretty_assertions::assert_eq;
@@ -223,6 +226,9 @@ fn legacy_codex_overlay_keeps_portable_components_fixed() {
   "name": "different-name",
   "version": "9.9.9",
   "description": "Codex description",
+  "setup": {
+    "commands": [{"name": "portable setup", "command": ["python3", "./setup.py"]}]
+  },
   "skills": [],
   "mcpServers": null,
   "interface": {"displayName": "Codex Demo"}
@@ -253,6 +259,17 @@ fn legacy_codex_overlay_keeps_portable_components_fixed() {
         ))
     );
     assert_eq!(
+        manifest.setup,
+        Some(PluginManifestSetup {
+            inputs: Vec::new(),
+            commands: vec![PluginManifestSetupCommand {
+                name: "portable setup".to_string(),
+                command: vec!["python3".to_string(), "./setup.py".to_string()],
+                interactive: false,
+            }],
+        })
+    );
+    assert_eq!(
         manifest
             .interface
             .and_then(|interface| interface.display_name),
@@ -269,6 +286,11 @@ fn inline_openai_extension_precedes_legacy_overlay() {
         r#",
   "extensions": {
     "com.openai": {
+      "setup": {
+        "commands": [
+          {"name": "inline setup", "command": ["python3", "./inline.py"]}
+        ]
+      },
       "interface": {"displayName": "Inline Codex"}
     }
   }"#,
@@ -276,16 +298,176 @@ fn inline_openai_extension_precedes_legacy_overlay() {
     fs::create_dir_all(plugin_root.join(".codex-plugin")).expect("create overlay dir");
     fs::write(
         plugin_root.join(".codex-plugin/plugin.json"),
-        r#"{"interface":{"displayName":"Legacy Codex"}}"#,
+        r#"{
+  "setup": {
+    "commands": [{"name": "legacy setup", "command": ["python3", "./legacy.py"]}]
+  },
+  "interface": {"displayName":"Legacy Codex"}
+}"#,
     )
     .expect("write overlay");
 
     let manifest = load_manifest(&plugin_root);
 
     assert_eq!(
+        manifest.setup,
+        Some(PluginManifestSetup {
+            inputs: Vec::new(),
+            commands: vec![PluginManifestSetupCommand {
+                name: "inline setup".to_string(),
+                command: vec!["python3".to_string(), "./inline.py".to_string()],
+                interactive: false,
+            }],
+        })
+    );
+    assert_eq!(
         manifest
             .interface
             .and_then(|interface| interface.display_name),
         Some("Inline Codex".to_string())
     );
+}
+
+#[test]
+fn inline_openai_interface_cannot_hide_legacy_overlay_setup() {
+    let tmp = tempdir().expect("tempdir");
+    let plugin_root = tmp.path().join("demo-plugin");
+    write_agent_plugin_manifest(
+        &plugin_root,
+        r#",
+  "extensions": {
+    "com.openai": {
+      "interface": {"displayName": "Inline Codex"}
+    }
+  }"#,
+    );
+    fs::create_dir_all(plugin_root.join(".codex-plugin")).expect("create overlay dir");
+    fs::write(
+        plugin_root.join(".codex-plugin/plugin.json"),
+        r#"{
+  "setup": {
+    "commands": [{"name": "legacy setup", "command": ["python3", "./legacy.py"]}]
+  },
+  "interface": {"displayName": "Legacy Codex"}
+}"#,
+    )
+    .expect("write overlay");
+
+    let manifest = load_manifest(&plugin_root);
+
+    assert_eq!(
+        manifest.setup,
+        Some(PluginManifestSetup {
+            inputs: Vec::new(),
+            commands: vec![PluginManifestSetupCommand {
+                name: "legacy setup".to_string(),
+                command: vec!["python3".to_string(), "./legacy.py".to_string()],
+                interactive: false,
+            }],
+        })
+    );
+    assert_eq!(
+        manifest
+            .interface
+            .and_then(|interface| interface.display_name),
+        Some("Inline Codex".to_string())
+    );
+}
+
+#[test]
+fn production_loader_prefers_portable_inline_setup_over_legacy_overlay() {
+    let tmp = tempdir().expect("tempdir");
+    let plugin_root = tmp.path().join("demo-plugin");
+    write_agent_plugin_manifest(
+        &plugin_root,
+        r#",
+  "extensions": {
+    "com.openai": {
+      "setup": {
+        "commands": [{"name": "inline setup", "command": ["python3", "./inline.py"]}]
+      },
+      "interface": {"displayName": "Inline Codex"}
+    }
+  }"#,
+    );
+    fs::create_dir_all(plugin_root.join(".codex-plugin")).expect("create overlay dir");
+    fs::write(
+        plugin_root.join(".codex-plugin/plugin.json"),
+        r#"{"name":"demo-plugin","interface":{"displayName":"Legacy Codex"}}"#,
+    )
+    .expect("write harmless legacy overlay");
+
+    let manifest = load_plugin_manifest(&plugin_root).expect("load production portable manifest");
+
+    assert_eq!(
+        manifest.setup,
+        Some(PluginManifestSetup {
+            inputs: Vec::new(),
+            commands: vec![PluginManifestSetupCommand {
+                name: "inline setup".to_string(),
+                command: vec!["python3".to_string(), "./inline.py".to_string()],
+                interactive: false,
+            }],
+        })
+    );
+    assert_eq!(
+        manifest
+            .interface
+            .and_then(|interface| interface.display_name),
+        Some("Inline Codex".to_string())
+    );
+}
+
+#[test]
+fn production_loader_discovers_portable_manifest_without_legacy_overlay() {
+    let tmp = tempdir().expect("tempdir");
+    let plugin_root = tmp.path().join("demo-plugin");
+    write_agent_plugin_manifest(
+        &plugin_root,
+        r#",
+  "extensions": {
+    "com.openai": {
+      "setup": {
+        "commands": [{"name": "inline setup", "command": ["python3", "./inline.py"]}]
+      }
+    }
+  }"#,
+    );
+
+    let manifest = load_plugin_manifest(&plugin_root).expect("load portable-only manifest");
+
+    assert_eq!(
+        manifest.setup,
+        Some(PluginManifestSetup {
+            inputs: Vec::new(),
+            commands: vec![PluginManifestSetupCommand {
+                name: "inline setup".to_string(),
+                command: vec!["python3".to_string(), "./inline.py".to_string()],
+                interactive: false,
+            }],
+        })
+    );
+}
+
+#[test]
+fn inline_openai_extension_rejects_invalid_legacy_setup_overlay() {
+    let tmp = tempdir().expect("tempdir");
+    let plugin_root = tmp.path().join("demo-plugin");
+    write_agent_plugin_manifest(
+        &plugin_root,
+        r#",
+  "extensions": {
+    "com.openai": {
+      "interface": {"displayName": "Inline Codex"}
+    }
+  }"#,
+    );
+    fs::create_dir_all(plugin_root.join(".codex-plugin")).expect("create overlay dir");
+    fs::write(
+        plugin_root.join(".codex-plugin/plugin.json"),
+        r#"{"setup":{"commands":[{"name":"hidden setup","command":[]}]}}"#,
+    )
+    .expect("write invalid security-bearing overlay");
+
+    assert_eq!(try_load_manifest(&plugin_root), None);
 }

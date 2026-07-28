@@ -19,6 +19,7 @@ pub mod remote_bundle;
 pub mod remote_legacy;
 mod remote_plugin_id_resolver;
 mod script_attribution;
+mod setup_install;
 pub mod startup_sync;
 pub mod store;
 #[cfg(test)]
@@ -54,6 +55,9 @@ pub use manager::ConfiguredMarketplace;
 pub use manager::ConfiguredMarketplaceListOutcome;
 pub use manager::ConfiguredMarketplacePlugin;
 pub use manager::EffectivePluginsChange;
+pub use manager::ForegroundPluginInstallOutcome;
+pub use manager::InstalledPluginSetup;
+pub use manager::PendingPluginSetup;
 pub use manager::PluginDetail;
 pub use manager::PluginDetailsUnavailableReason;
 pub use manager::PluginInstallError;

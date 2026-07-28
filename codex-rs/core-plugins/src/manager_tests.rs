@@ -2183,6 +2183,7 @@ async fn load_plugin_skills_dedupes_overlapping_manifest_roots() {
         version: None,
         description: None,
         keywords: Vec::new(),
+        setup: None,
         paths: crate::manifest::PluginManifestPaths {
             skills: vec![
                 plugin_root.join("skills"),
@@ -5632,6 +5633,61 @@ fn refresh_curated_plugin_cache_replaces_existing_local_version_with_short_sha_v
 }
 
 #[test]
+fn curated_refresh_skips_setup_plugin_and_continues() {
+    let tmp = tempfile::tempdir().unwrap();
+    let curated_root = curated_plugins_repo_path(tmp.path());
+    write_openai_curated_marketplace(&curated_root, &["setup-plugin", "good-plugin"]);
+    write_file(
+        &curated_root.join("plugins/setup-plugin/.codex-plugin/plugin.json"),
+        r#"{
+  "name": "setup-plugin",
+  "setup": { "command": ["node", "./setup.mjs"] }
+}"#,
+    );
+    let cache_root = tmp.path().join("plugins/cache/openai-curated");
+    write_file(
+        &cache_root.join("setup-plugin/old/.codex-plugin/plugin.json"),
+        r#"{
+  "name": "setup-plugin",
+  "setup": { "command": ["node", "./setup.mjs"] }
+}"#,
+    );
+    write_plugin(&cache_root, "good-plugin/old", "good-plugin");
+    let setup_id = PluginId::new(
+        "setup-plugin".to_string(),
+        OPENAI_CURATED_MARKETPLACE_NAME.to_string(),
+    )
+    .unwrap();
+    let good_id = PluginId::new(
+        "good-plugin".to_string(),
+        OPENAI_CURATED_MARKETPLACE_NAME.to_string(),
+    )
+    .unwrap();
+
+    assert!(
+        refresh_curated_plugin_cache(
+            tmp.path(),
+            TEST_CURATED_PLUGIN_SHA,
+            &[setup_id.clone(), good_id.clone()],
+        )
+        .expect("setup-bearing plugin should not abort curated refresh")
+    );
+
+    assert_eq!(
+        PluginStore::new(tmp.path().to_path_buf())
+            .active_plugin_version(&setup_id)
+            .as_deref(),
+        Some("old")
+    );
+    assert_eq!(
+        PluginStore::new(tmp.path().to_path_buf())
+            .active_plugin_version(&good_id)
+            .as_deref(),
+        Some(TEST_CURATED_PLUGIN_CACHE_VERSION)
+    );
+}
+
+#[test]
 fn refresh_curated_plugin_cache_reinstalls_missing_configured_plugin_with_current_short_version() {
     let tmp = tempfile::tempdir().unwrap();
     let curated_root = curated_plugins_repo_path(tmp.path());
@@ -5890,6 +5946,72 @@ enabled = true
         tmp.path()
             .join("plugins/cache/debug/sample-plugin/1.2.3")
             .is_dir()
+    );
+}
+
+#[test]
+fn refresh_non_curated_plugin_cache_preserves_plain_plugin_when_update_adds_setup() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_root = tmp.path().join("repo");
+    fs::create_dir_all(repo_root.join(".git")).unwrap();
+    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    write_plugin_with_version(&repo_root, "sample-plugin", "sample-plugin", Some("2.0.0"));
+    write_file(
+        &repo_root.join("sample-plugin/.codex-plugin/plugin.json"),
+        r#"{
+  "name": "sample-plugin",
+  "version": "2.0.0",
+  "setup": {
+    "commands": [{"name": "configure", "command": ["python3", "./setup.py"]}]
+  }
+}"#,
+    );
+    write_file(
+        &repo_root.join(".agents/plugins/marketplace.json"),
+        r#"{
+  "name": "debug",
+  "plugins": [{
+    "name": "sample-plugin",
+    "source": {"source": "local", "path": "./sample-plugin"}
+  }]
+}"#,
+    );
+    write_plugin_with_version(
+        &tmp.path().join("plugins/cache/debug"),
+        "sample-plugin/1.0.0",
+        "sample-plugin",
+        Some("1.0.0"),
+    );
+    let sentinel = tmp
+        .path()
+        .join("plugins/cache/debug/sample-plugin/1.0.0/active-sentinel");
+    write_file(&sentinel, "preserve approved original");
+    write_file(
+        &tmp.path().join(CONFIG_TOML_FILE),
+        r#"[features]
+plugins = true
+
+[plugins."sample-plugin@debug"]
+enabled = true
+"#,
+    );
+
+    assert!(
+        !refresh_non_curated_plugin_cache(
+            tmp.path(),
+            &[AbsolutePathBuf::try_from(repo_root).unwrap()],
+            &["sample-plugin@debug".to_string()],
+        )
+        .expect("an update requiring setup must preserve the old plugin without upgrade errors")
+    );
+    assert_eq!(
+        fs::read_to_string(sentinel).unwrap(),
+        "preserve approved original"
+    );
+    assert!(
+        !tmp.path()
+            .join("plugins/cache/debug/sample-plugin/2.0.0")
+            .exists()
     );
 }
 

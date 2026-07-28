@@ -3,6 +3,8 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
 use codex_utils_plugins::AGENT_PLUGIN_MANIFEST_RELATIVE_PATH;
+use codex_utils_plugins::AgentPluginSchemaStatus;
+use codex_utils_plugins::agent_plugin_schema_status;
 use codex_utils_plugins::find_plugin_manifest_path;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
@@ -16,11 +18,20 @@ const MAX_DEFAULT_PROMPT_LEN: usize = 128;
 #[path = "agent_plugin_manifest.rs"]
 mod agent_plugin_manifest;
 
+#[path = "setup_manifest.rs"]
+mod setup_manifest;
+
 #[cfg(test)]
 #[path = "agent_plugin_manifest_tests.rs"]
 mod agent_plugin_manifest_tests;
 
+#[cfg(test)]
+#[path = "setup_manifest_tests.rs"]
+mod setup_manifest_tests;
+
 use agent_plugin_manifest::parse_agent_plugin_manifest_uri;
+use setup_manifest::RawPluginManifestSetup;
+use setup_manifest::resolve_plugin_setup;
 
 pub type PluginManifest = codex_plugin::manifest::PluginManifest<AbsolutePathBuf>;
 pub type PluginManifestHooks = codex_plugin::manifest::PluginManifestHooks<AbsolutePathBuf>;
@@ -42,6 +53,8 @@ struct RawPluginManifest {
     description: Option<String>,
     #[serde(default)]
     keywords: Vec<String>,
+    #[serde(default)]
+    setup: Option<RawPluginManifestSetup>,
     // Keep manifest paths as raw strings so we can validate the required `./...` syntax before
     // resolving them under the plugin root.
     #[serde(default)]
@@ -143,8 +156,19 @@ enum RawPluginManifestHooks {
 
 /// Loads a plugin manifest from the local host filesystem.
 pub fn load_plugin_manifest(plugin_root: &Path) -> Option<PluginManifest> {
-    let manifest_path = find_plugin_manifest_path(plugin_root)?;
-    let contents = fs::read_to_string(&manifest_path).ok()?;
+    let agent_manifest_path = plugin_root.join(AGENT_PLUGIN_MANIFEST_RELATIVE_PATH);
+    let portable_manifest = fs::read_to_string(&agent_manifest_path)
+        .ok()
+        .filter(|contents| {
+            agent_plugin_schema_status(contents) == AgentPluginSchemaStatus::Supported
+        });
+    let (manifest_path, contents) = if let Some(contents) = portable_manifest {
+        (agent_manifest_path, contents)
+    } else {
+        let manifest_path = find_plugin_manifest_path(plugin_root)?;
+        let contents = fs::read_to_string(&manifest_path).ok()?;
+        (manifest_path, contents)
+    };
     let is_agent_plugin = manifest_path == plugin_root.join(AGENT_PLUGIN_MANIFEST_RELATIVE_PATH);
     let overlay = if is_agent_plugin {
         let overlay_path = plugin_root.join(".codex-plugin/plugin.json");
@@ -270,6 +294,7 @@ fn resolve_raw_plugin_manifest(
         version,
         description,
         keywords,
+        setup,
         skills,
         mcp_servers,
         apps,
@@ -285,6 +310,7 @@ fn resolve_raw_plugin_manifest(
         let version = version.trim();
         (!version.is_empty()).then(|| version.to_string())
     });
+    let setup = setup.map(resolve_plugin_setup).transpose()?;
     let interface = interface.and_then(|interface| {
         let RawPluginManifestInterface {
             display_name,
@@ -365,6 +391,7 @@ fn resolve_raw_plugin_manifest(
         version,
         description,
         keywords,
+        setup,
         paths: codex_plugin::manifest::PluginManifestPaths {
             skills: resolve_manifest_paths(plugin_root, "skills", skills.as_ref()),
             mcp_servers: resolve_manifest_mcp_servers(plugin_root, mcp_servers),
@@ -968,6 +995,7 @@ mod tests {
                 version: None,
                 description: None,
                 keywords: Vec::new(),
+                setup: None,
                 paths: PluginManifestPaths {
                     skills: vec![plugin_root.join("skills").expect("skills URI")],
                     mcp_servers: Some(PluginManifestMcpServers::Path(

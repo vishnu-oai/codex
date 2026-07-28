@@ -69,6 +69,201 @@ const TEST_ALLOW_HTTP_REMOTE_PLUGIN_BUNDLE_DOWNLOADS: &str =
     "CODEX_TEST_ALLOW_HTTP_REMOTE_PLUGIN_BUNDLE_DOWNLOADS";
 
 #[tokio::test]
+async fn plugin_install_rejects_setup_plugin_without_mutation() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let repo_root = TempDir::new()?;
+    write_plugin_marketplace(
+        repo_root.path(),
+        "debug",
+        "sample-plugin",
+        "./sample-plugin",
+        /*install_policy*/ None,
+        /*auth_policy*/ None,
+    )?;
+    write_plugin_source(repo_root.path(), "sample-plugin", &[])?;
+    std::fs::write(
+        repo_root
+            .path()
+            .join("sample-plugin/.codex-plugin/plugin.json"),
+        r#"{
+  "name": "sample-plugin",
+  "version": "1.0.0",
+  "setup": { "command": ["node", "./setup.mjs"] }
+}"#,
+    )?;
+    let marketplace_path =
+        AbsolutePathBuf::try_from(repo_root.path().join(".agents/plugins/marketplace.json"))?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_plugin_install_request(PluginInstallParams {
+            marketplace_path: Some(marketplace_path),
+            remote_marketplace_name: None,
+            plugin_name: "sample-plugin".to_string(),
+        })
+        .await?;
+    let err = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    assert_eq!(err.error.code, -32600);
+    assert!(err.error.message.contains("codex plugin add"));
+    assert!(
+        !codex_home
+            .path()
+            .join("plugins/cache/debug/sample-plugin")
+            .exists()
+    );
+    let config = std::fs::read_to_string(codex_home.path().join("config.toml")).unwrap_or_default();
+    assert!(!config.contains(r#"[plugins."sample-plugin@debug"]"#));
+    Ok(())
+}
+
+#[tokio::test]
+async fn plugin_install_rejects_setup_from_marketplace_fallback_without_mutation() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let repo_root = TempDir::new()?;
+    std::fs::create_dir_all(repo_root.path().join(".agents/plugins"))?;
+    std::fs::create_dir_all(repo_root.path().join("sample-plugin"))?;
+    std::fs::write(
+        repo_root.path().join("sample-plugin/README.md"),
+        "plugin without an on-disk manifest",
+    )?;
+    std::fs::write(
+        repo_root.path().join(".agents/plugins/marketplace.json"),
+        serde_json::to_vec_pretty(&json!({
+            "name": "debug",
+            "plugins": [{
+                "name": "sample-plugin",
+                "source": {
+                    "source": "local",
+                    "path": "./sample-plugin"
+                },
+                "version": "1.0.0",
+                "setup": {
+                    "command": ["node", "./setup.mjs"]
+                }
+            }]
+        }))?,
+    )?;
+    let marketplace_path =
+        AbsolutePathBuf::try_from(repo_root.path().join(".agents/plugins/marketplace.json"))?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_plugin_install_request(PluginInstallParams {
+            marketplace_path: Some(marketplace_path),
+            remote_marketplace_name: None,
+            plugin_name: "sample-plugin".to_string(),
+        })
+        .await?;
+    let err = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    assert_eq!(err.error.code, -32600);
+    assert!(err.error.message.contains("codex plugin add"));
+    assert!(
+        !codex_home
+            .path()
+            .join("plugins/cache/debug/sample-plugin")
+            .exists()
+    );
+    let config = std::fs::read_to_string(codex_home.path().join("config.toml")).unwrap_or_default();
+    assert!(!config.contains(r#"[plugins."sample-plugin@debug"]"#));
+    Ok(())
+}
+
+#[tokio::test]
+async fn plugin_install_rejects_portable_inline_setup_hidden_by_legacy_overlay() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let repo_root = TempDir::new()?;
+    write_plugin_marketplace(
+        repo_root.path(),
+        "debug",
+        "sample-plugin",
+        "./sample-plugin",
+        /*install_policy*/ None,
+        /*auth_policy*/ None,
+    )?;
+    write_plugin_source(repo_root.path(), "sample-plugin", &[])?;
+    let plugin_root = repo_root.path().join("sample-plugin");
+    std::fs::write(
+        plugin_root.join("plugin.json"),
+        serde_json::to_vec_pretty(&json!({
+            "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+            "name": "sample-plugin",
+            "version": "1.0.0",
+            "extensions": {
+                "com.openai": {
+                    "interface": {"displayName": "Portable Customer Plugin"},
+                    "setup": {
+                        "commands": [{
+                            "name": "authenticate customer MCP",
+                            "command": ["python3", "./scripts/authenticate.py"]
+                        }]
+                    }
+                }
+            }
+        }))?,
+    )?;
+    std::fs::write(
+        plugin_root.join(".codex-plugin/plugin.json"),
+        serde_json::to_vec_pretty(&json!({
+            "name": "sample-plugin",
+            "interface": {"displayName": "Harmless Legacy Overlay"}
+        }))?,
+    )?;
+    let marketplace_path =
+        AbsolutePathBuf::try_from(repo_root.path().join(".agents/plugins/marketplace.json"))?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_plugin_install_request(PluginInstallParams {
+            marketplace_path: Some(marketplace_path),
+            remote_marketplace_name: None,
+            plugin_name: "sample-plugin".to_string(),
+        })
+        .await?;
+    let error = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    assert_eq!(error.error.code, -32600);
+    assert!(error.error.message.contains("codex plugin add"));
+    assert!(
+        !codex_home
+            .path()
+            .join("plugins/cache/debug/sample-plugin")
+            .exists()
+    );
+    let config = std::fs::read_to_string(codex_home.path().join("config.toml")).unwrap_or_default();
+    assert!(!config.contains(r#"[plugins."sample-plugin@debug"]"#));
+    Ok(())
+}
+
+#[tokio::test]
 async fn plugin_install_rejects_relative_marketplace_paths() -> Result<()> {
     let codex_home = TempDir::new()?;
     let mut mcp = TestAppServer::builder()

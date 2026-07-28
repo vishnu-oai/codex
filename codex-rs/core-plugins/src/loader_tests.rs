@@ -1,5 +1,8 @@
 use super::*;
 use crate::manifest::load_plugin_manifest;
+use crate::setup_install::plugin_content_fingerprint;
+use crate::setup_install::write_setup_completion_marker;
+use crate::store::ForegroundPluginInstallRequest;
 use crate::test_support::write_file;
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerSource;
@@ -23,6 +26,149 @@ fn user_layer(path: AbsolutePathBuf, config: &str) -> ConfigLayerEntry {
         },
         toml::from_str(config).expect("user config toml"),
     )
+}
+
+#[tokio::test]
+async fn configured_setup_plugin_without_completion_marker_loads_no_capabilities() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let plugin_root = temp_dir
+        .path()
+        .join("plugins/cache/test/pending-setup/1.0.0");
+    write_file(
+        &plugin_root.join(".codex-plugin/plugin.json"),
+        r#"{
+  "name": "pending-setup",
+  "setup": { "command": ["node", "./setup.js"] },
+  "skills": ["./skills"],
+  "mcpServers": "./.mcp.json",
+  "apps": "./.app.json",
+  "hooks": "./hooks.json"
+}"#,
+    );
+    write_file(
+        &plugin_root.join("skills/example/SKILL.md"),
+        "---\nname: example\ndescription: example skill\n---\n",
+    );
+    write_file(
+        &plugin_root.join(".mcp.json"),
+        r#"{"mcpServers":{"example":{"command":"echo"}}}"#,
+    );
+    write_file(
+        &plugin_root.join(".app.json"),
+        r#"{"apps":{"example":{"id":"connector_example"}}}"#,
+    );
+    write_file(
+        &plugin_root.join("hooks.json"),
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo setup"}]}]}}"#,
+    );
+    let stack = ConfigLayerStack::new(
+        vec![user_layer(
+            user_config_path(&temp_dir, "config.toml"),
+            "[plugins.\"pending-setup@test\"]\nenabled = true\n",
+        )],
+        ConfigRequirements::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("valid config layer stack");
+
+    let plugins = load_plugins_from_layer_stack(
+        &stack,
+        RemoteInstalledPluginsSnapshot::default(),
+        &PluginStore::new(temp_dir.path().to_path_buf()),
+        /*plugin_skill_snapshots*/ None,
+        Some(Product::Codex),
+        /*remote_global_catalog_active*/ false,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
+    .await;
+
+    let plugin = plugins
+        .iter()
+        .find(|plugin| plugin.config_name == "pending-setup@test")
+        .expect("configured plugin");
+    assert!(!plugin.is_active());
+    assert!(
+        plugin
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("setup completion marker is missing"))
+    );
+    assert!(plugin.skill_roots.is_empty());
+    assert!(plugin.mcp_servers.is_empty());
+    assert!(plugin.apps.is_empty());
+    assert!(plugin.hook_sources.is_empty());
+}
+
+#[tokio::test]
+async fn setup_load_fails_closed_while_cache_mutation_is_in_progress() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let store = PluginStore::new(temp_dir.path().to_path_buf());
+    let plugin_id = PluginId::new("sample".to_string(), "test".to_string()).unwrap();
+    let completed_source = temp_dir.path().join("completed-source");
+    write_file(
+        &completed_source.join(".codex-plugin/plugin.json"),
+        r#"{
+  "name": "sample",
+  "version": "1.0.0",
+  "setup": { "command": ["node", "./setup.js"] },
+  "skills": ["./skills"]
+}"#,
+    );
+    write_file(
+        &completed_source.join("skills/completed/SKILL.md"),
+        "---\nname: completed\ndescription: completed\n---\n",
+    );
+    let completed = store
+        .install_from_foreground(ForegroundPluginInstallRequest {
+            source_path: AbsolutePathBuf::try_from(completed_source).unwrap(),
+            plugin_id: plugin_id.clone(),
+            plugin_version: None,
+            fallback_manifest_contents: None,
+        })
+        .unwrap();
+    let fingerprint = plugin_content_fingerprint(completed.installed_path.as_path()).unwrap();
+    write_setup_completion_marker(completed.installed_path.as_path(), &fingerprint).unwrap();
+
+    let stack = ConfigLayerStack::new(
+        vec![user_layer(
+            user_config_path(&temp_dir, "config.toml"),
+            "[plugins.\"sample@test\"]\nenabled = true\n",
+        )],
+        ConfigRequirements::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("valid config layer stack");
+    let install_lock = store.acquire_mutation_lock(&plugin_id).unwrap();
+    let store_for_load = store.clone();
+    let load = tokio::spawn(async move {
+        load_plugins_from_layer_stack(
+            &stack,
+            RemoteInstalledPluginsSnapshot::default(),
+            &store_for_load,
+            /*plugin_skill_snapshots*/ None,
+            Some(Product::Codex),
+            /*remote_global_catalog_active*/ false,
+            Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+        )
+        .await
+    });
+    let plugins = tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 1), load)
+        .await
+        .expect("plugin loading must not wait for a cache writer")
+        .unwrap();
+    let plugin = plugins
+        .iter()
+        .find(|plugin| plugin.config_name == "sample@test")
+        .expect("configured plugin");
+    assert!(!plugin.is_active());
+    assert!(
+        plugin
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("plugin cache mutation is in progress"))
+    );
+    assert!(plugin.skill_roots.is_empty());
+    drop(install_lock);
 }
 
 #[test]

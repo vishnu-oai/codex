@@ -10,8 +10,47 @@ pub struct PluginManifest<Resource> {
     pub version: Option<String>,
     pub description: Option<String>,
     pub keywords: Vec<String>,
+    pub setup: Option<PluginManifestSetup>,
     pub paths: PluginManifestPaths<Resource>,
     pub interface: Option<PluginManifestInterface<Resource>>,
+}
+
+/// Explicit foreground setup declared by a plugin package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginManifestSetup {
+    /// User inputs collected once and exposed to every setup command.
+    pub inputs: Vec<PluginManifestSetupInput>,
+    /// Named commands executed in their declared order.
+    pub commands: Vec<PluginManifestSetupCommand>,
+}
+
+/// One value that a plugin asks the foreground setup user to provide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginManifestSetupInput {
+    pub id: String,
+    pub input_type: PluginManifestSetupInputType,
+    pub prompt: String,
+    pub env: String,
+    pub required: bool,
+}
+
+/// Validation and terminal-display behavior of a declared setup input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginManifestSetupInputType {
+    Text,
+    Directory,
+    File,
+    Secret,
+}
+
+/// One directly executed foreground setup step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginManifestSetupCommand {
+    pub name: String,
+    /// Executable followed by arguments; this is never evaluated as shell text.
+    pub command: Vec<String>,
+    /// Whether the approved process may read from the user's interactive terminal.
+    pub interactive: bool,
 }
 
 /// Component resources declared by a plugin manifest.
@@ -100,6 +139,7 @@ impl<Resource> PluginManifest<Resource> {
             version,
             description,
             keywords,
+            setup,
             paths,
             interface,
         } = self;
@@ -176,6 +216,7 @@ impl<Resource> PluginManifest<Resource> {
             version,
             description,
             keywords,
+            setup,
             paths: PluginManifestPaths {
                 skills: skills
                     .into_iter()

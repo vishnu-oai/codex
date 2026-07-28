@@ -400,6 +400,7 @@ fn resolved_plugin(
             version: None,
             description: None,
             keywords: Vec::new(),
+            setup: None,
             paths: PluginManifestPaths {
                 skills: Vec::new(),
                 mcp_servers,

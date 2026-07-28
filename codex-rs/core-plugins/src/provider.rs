@@ -8,7 +8,10 @@ use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_utils_path_uri::PathUri;
 use codex_utils_path_uri::PathUriParseError;
+use codex_utils_plugins::AGENT_PLUGIN_MANIFEST_RELATIVE_PATH;
+use codex_utils_plugins::AgentPluginSchemaStatus;
 use codex_utils_plugins::DISCOVERABLE_PLUGIN_MANIFEST_PATHS;
+use codex_utils_plugins::agent_plugin_schema_status;
 use std::io;
 use std::sync::Arc;
 use thiserror::Error;
@@ -63,6 +66,10 @@ pub enum ExecutorPluginProviderError {
         #[source]
         source: serde_json::Error,
     },
+    #[error(
+        "selected capability root {root_id} declares plugin setup; install and approve it through the foreground Codex CLI"
+    )]
+    SetupRequiresForeground { root_id: String },
     #[error("failed to construct plugin descriptor for `{root_id}`: {source}")]
     ConstructDescriptor {
         root_id: String,
@@ -170,6 +177,53 @@ async fn resolve_plugin_root(
         });
     }
 
+    let portable_manifest_uri = plugin_root
+        .join(AGENT_PLUGIN_MANIFEST_RELATIVE_PATH)
+        .map_err(|source| ExecutorPluginProviderError::InvalidManifestPath {
+            root_id: root_id.clone(),
+            root: plugin_root.clone(),
+            relative_path: AGENT_PLUGIN_MANIFEST_RELATIVE_PATH,
+            source,
+        })?;
+    match file_system
+        .get_metadata(&portable_manifest_uri, /*sandbox*/ None)
+        .await
+    {
+        Ok(metadata) if metadata.is_file => {
+            let contents = file_system
+                .read_file_text(&portable_manifest_uri, /*sandbox*/ None)
+                .await
+                .map_err(|source| ExecutorPluginProviderError::ReadManifest {
+                    root_id: root_id.clone(),
+                    path: portable_manifest_uri.clone(),
+                    source,
+                })?;
+            if agent_plugin_schema_status(&contents) == AgentPluginSchemaStatus::Supported {
+                let portable_manifest =
+                    parse_plugin_manifest_uri(&plugin_root, &portable_manifest_uri, &contents)
+                        .map_err(|source| ExecutorPluginProviderError::ParseManifest {
+                            root_id: root_id.clone(),
+                            path: portable_manifest_uri.clone(),
+                            source,
+                        })?;
+                if portable_manifest.setup.is_some() {
+                    return Err(ExecutorPluginProviderError::SetupRequiresForeground {
+                        root_id: root_id.clone(),
+                    });
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(ExecutorPluginProviderError::InspectManifest {
+                root_id: root_id.clone(),
+                path: portable_manifest_uri,
+                source,
+            });
+        }
+    }
+
     let mut manifest_path = None;
     for relative_path in DISCOVERABLE_PLUGIN_MANIFEST_PATHS {
         let candidate_uri = plugin_root.join(relative_path).map_err(|source| {
@@ -218,6 +272,11 @@ async fn resolve_plugin_root(
                 source,
             }
         })?;
+    if manifest.setup.is_some() {
+        return Err(ExecutorPluginProviderError::SetupRequiresForeground {
+            root_id: root_id.clone(),
+        });
+    }
 
     let plugin = ResolvedPlugin::from_environment(
         root_id.clone(),

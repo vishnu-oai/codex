@@ -34,6 +34,356 @@ fn write_plugin(root: &Path, dir_name: &str, manifest_name: &str) {
     );
 }
 
+fn write_setup_plugin(root: &Path, dir_name: &str, manifest_version: &str) -> PathBuf {
+    write_setup_plugin_with_script(root, dir_name, manifest_version, "// setup")
+}
+
+fn write_setup_plugin_with_script(
+    root: &Path,
+    dir_name: &str,
+    manifest_version: &str,
+    script_contents: &str,
+) -> PathBuf {
+    let plugin_root = root.join(dir_name);
+    fs::create_dir_all(plugin_root.join(".codex-plugin")).unwrap();
+    fs::write(
+        plugin_root.join(".codex-plugin/plugin.json"),
+        serde_json::to_vec_pretty(&json!({
+            "name": "sample-plugin",
+            "version": manifest_version,
+            "setup": {
+                "command": ["node", "./scripts/setup.mjs"]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::create_dir_all(plugin_root.join("scripts")).unwrap();
+    fs::write(plugin_root.join("scripts/setup.mjs"), script_contents).unwrap();
+    plugin_root
+}
+
+#[test]
+fn normal_install_rejects_setup_before_writing_cache() {
+    let tmp = tempdir().unwrap();
+    let source = write_setup_plugin(tmp.path(), "setup-source", "1.0.0");
+    let plugin_id = PluginId::new("sample-plugin".to_string(), "debug".to_string()).unwrap();
+    let store = PluginStore::new(tmp.path().to_path_buf());
+
+    let err = store
+        .install(
+            AbsolutePathBuf::try_from(source).unwrap(),
+            plugin_id.clone(),
+        )
+        .expect_err("background-style install must reject setup");
+
+    assert!(matches!(
+        err,
+        PluginStoreError::SetupCommandRequiresForeground { .. }
+    ));
+    assert!(!store.plugin_base_root(&plugin_id).as_path().exists());
+}
+
+#[test]
+fn foreground_install_materializes_and_can_replace_inert_setup_cache() {
+    let tmp = tempdir().unwrap();
+    let plugin_id = PluginId::new("sample-plugin".to_string(), "debug".to_string()).unwrap();
+    let store = PluginStore::new(tmp.path().to_path_buf());
+    let first_source = write_setup_plugin_with_script(
+        tmp.path(),
+        "first-source",
+        "1.0.0",
+        "// original setup bytes",
+    );
+
+    let first = store
+        .install_from_foreground(ForegroundPluginInstallRequest {
+            source_path: AbsolutePathBuf::try_from(first_source).unwrap(),
+            plugin_id: plugin_id.clone(),
+            plugin_version: None,
+            fallback_manifest_contents: None,
+        })
+        .expect("materialize initial setup plugin");
+    fs::write(first.installed_path.join("inert-sentinel"), "old").unwrap();
+
+    let second_source = write_setup_plugin_with_script(
+        tmp.path(),
+        "second-source",
+        "1.0.0",
+        "// updated setup bytes",
+    );
+    let second = store
+        .install_from_foreground(ForegroundPluginInstallRequest {
+            source_path: AbsolutePathBuf::try_from(second_source).unwrap(),
+            plugin_id: plugin_id.clone(),
+            plugin_version: None,
+            fallback_manifest_contents: None,
+        })
+        .expect("replace inert setup cache");
+
+    assert_eq!(second.plugin_id, plugin_id);
+    assert!(second.plugin_version.starts_with("@setup-"));
+    assert_eq!(
+        second.installed_path,
+        store.plugin_root(&second.plugin_id, &second.plugin_version)
+    );
+    assert_ne!(first.installed_path, second.installed_path);
+    assert!(!first.installed_path.as_path().exists());
+    assert_eq!(
+        fs::read_to_string(second.installed_path.join("scripts/setup.mjs")).unwrap(),
+        "// updated setup bytes"
+    );
+    assert!(
+        !second
+            .installed_path
+            .join("inert-sentinel")
+            .as_path()
+            .exists()
+    );
+}
+
+#[test]
+fn setup_cache_namespace_cannot_be_supplied_as_a_plugin_version() {
+    let valid_internal_version = format!("@setup-{}", "a".repeat(64));
+
+    assert!(validate_plugin_version_segment(&valid_internal_version).is_err());
+    assert_eq!(
+        validate_plugin_cache_version_segment(&valid_internal_version),
+        Ok(())
+    );
+    assert!(validate_plugin_cache_version_segment("@setup-abc").is_err());
+    assert!(validate_plugin_cache_version_segment(&format!("@setup-{}", "A".repeat(64))).is_err());
+}
+
+#[test]
+fn setup_cache_generation_is_derived_after_staging_is_finalized() {
+    let tmp = tempdir().unwrap();
+    let source =
+        write_setup_plugin_with_script(tmp.path(), "setup-source", "1.0.0", "// source bytes");
+    let source_version = setup_cache_version(&source).unwrap();
+    let target_root = tmp.path().join("cache/sample-plugin");
+
+    let cache_version = replace_plugin_root_atomically(
+        &source,
+        &target_root,
+        InstallCacheVersion::SetupContentAddressed,
+        InstallManifest::OnDisk,
+        |staged_root| {
+            fs::write(staged_root.join("scripts/setup.mjs"), "// finalized bytes")
+                .map_err(|err| PluginStoreError::io("failed to mutate staged test plugin", err))
+        },
+    )
+    .unwrap();
+    let installed_root = target_root.join(&cache_version);
+
+    assert_ne!(cache_version, source_version);
+    assert_eq!(cache_version, setup_cache_version(&installed_root).unwrap());
+    assert_eq!(
+        fs::read_to_string(installed_root.join("scripts/setup.mjs")).unwrap(),
+        "// finalized bytes"
+    );
+}
+
+#[test]
+fn install_strips_source_supplied_setup_completion_marker() {
+    let tmp = tempdir().unwrap();
+    let source = write_setup_plugin(tmp.path(), "setup-source", "1.0.0");
+    let source_marker = source.join(".codex-plugin/setup-complete.json");
+    fs::write(
+        &source_marker,
+        r#"{"schema_version":1,"content_fingerprint":"forged"}"#,
+    )
+    .unwrap();
+    let plugin_id = PluginId::new("sample-plugin".to_string(), "debug".to_string()).unwrap();
+    let store = PluginStore::new(tmp.path().to_path_buf());
+
+    let result = store
+        .install_from_foreground(ForegroundPluginInstallRequest {
+            source_path: AbsolutePathBuf::try_from(source).unwrap(),
+            plugin_id,
+            plugin_version: None,
+            fallback_manifest_contents: None,
+        })
+        .unwrap();
+
+    assert!(source_marker.is_file());
+    assert!(
+        !result
+            .installed_path
+            .join(".codex-plugin/setup-complete.json")
+            .as_path()
+            .exists()
+    );
+}
+
+#[test]
+fn foreground_setup_install_does_not_replace_existing_plain_cache() {
+    let tmp = tempdir().unwrap();
+    let plugin_id = PluginId::new("sample-plugin".to_string(), "debug".to_string()).unwrap();
+    let store = PluginStore::new(tmp.path().to_path_buf());
+    write_plugin_with_version(tmp.path(), "plain-source", "sample-plugin", Some("1.0.0"));
+    let existing = store
+        .install(
+            AbsolutePathBuf::try_from(tmp.path().join("plain-source")).unwrap(),
+            plugin_id.clone(),
+        )
+        .expect("install existing plain plugin");
+    fs::write(existing.installed_path.join("active-sentinel"), "keep").unwrap();
+    let setup_source = write_setup_plugin(tmp.path(), "setup-source", "1.0.0");
+
+    let err = store
+        .install_from_foreground(ForegroundPluginInstallRequest {
+            source_path: AbsolutePathBuf::try_from(setup_source).unwrap(),
+            plugin_id,
+            plugin_version: None,
+            fallback_manifest_contents: None,
+        })
+        .expect_err("foreground setup must not replace a plain cache from another installer");
+
+    assert!(matches!(
+        err,
+        PluginStoreError::SetupCommandUpdateUnsupported { .. }
+    ));
+    assert_eq!(
+        fs::read_to_string(existing.installed_path.join("active-sentinel")).unwrap(),
+        "keep"
+    );
+    assert!(
+        existing
+            .installed_path
+            .join(".codex-plugin/plugin.json")
+            .is_file()
+    );
+}
+
+#[test]
+fn normal_update_preserves_existing_setup_plugin() {
+    let tmp = tempdir().unwrap();
+    let plugin_id = PluginId::new("sample-plugin".to_string(), "debug".to_string()).unwrap();
+    let store = PluginStore::new(tmp.path().to_path_buf());
+    let first_source = write_setup_plugin(tmp.path(), "first-source", "1.0.0");
+    let first = store
+        .install_from_foreground(ForegroundPluginInstallRequest {
+            source_path: AbsolutePathBuf::try_from(first_source).unwrap(),
+            plugin_id: plugin_id.clone(),
+            plugin_version: None,
+            fallback_manifest_contents: None,
+        })
+        .expect("materialize initial setup plugin");
+    fs::write(first.installed_path.join("active-sentinel"), "keep").unwrap();
+    let second_source = write_setup_plugin(tmp.path(), "second-source", "1.1.0");
+
+    let err = store
+        .install(
+            AbsolutePathBuf::try_from(second_source).unwrap(),
+            plugin_id.clone(),
+        )
+        .expect_err("setup update must fail closed");
+
+    assert!(matches!(
+        err,
+        PluginStoreError::SetupCommandUpdateUnsupported { .. }
+    ));
+    assert_eq!(
+        store.active_plugin_version(&plugin_id).as_deref(),
+        Some(first.plugin_version.as_str())
+    );
+    assert_eq!(
+        fs::read_to_string(first.installed_path.join("active-sentinel")).unwrap(),
+        "keep"
+    );
+}
+
+#[test]
+fn normal_update_with_same_setup_command_preserves_existing_script_bytes() {
+    let tmp = tempdir().unwrap();
+    let plugin_id = PluginId::new("sample-plugin".to_string(), "debug".to_string()).unwrap();
+    let store = PluginStore::new(tmp.path().to_path_buf());
+    let first_source = write_setup_plugin_with_script(
+        tmp.path(),
+        "first-source",
+        "1.0.0",
+        "// original setup bytes",
+    );
+    let first = store
+        .install_from_foreground(ForegroundPluginInstallRequest {
+            source_path: AbsolutePathBuf::try_from(first_source).unwrap(),
+            plugin_id: plugin_id.clone(),
+            plugin_version: None,
+            fallback_manifest_contents: None,
+        })
+        .expect("materialize initial setup plugin");
+    let second_source = write_setup_plugin_with_script(
+        tmp.path(),
+        "second-source",
+        "1.0.0",
+        "// replacement setup bytes",
+    );
+
+    let err = store
+        .install(
+            AbsolutePathBuf::try_from(second_source).unwrap(),
+            plugin_id.clone(),
+        )
+        .expect_err("setup update with unchanged argv must fail closed");
+
+    assert!(matches!(
+        err,
+        PluginStoreError::SetupCommandUpdateUnsupported { .. }
+    ));
+    assert_eq!(
+        store.active_plugin_version(&plugin_id).as_deref(),
+        Some(first.plugin_version.as_str())
+    );
+    assert_eq!(
+        fs::read(first.installed_path.join("scripts/setup.mjs")).unwrap(),
+        b"// original setup bytes"
+    );
+}
+
+#[test]
+fn normal_update_from_setup_to_plain_preserves_existing_plugin() {
+    let tmp = tempdir().unwrap();
+    let plugin_id = PluginId::new("sample-plugin".to_string(), "debug".to_string()).unwrap();
+    let store = PluginStore::new(tmp.path().to_path_buf());
+    let first_source = write_setup_plugin_with_script(
+        tmp.path(),
+        "first-source",
+        "1.0.0",
+        "// original setup bytes",
+    );
+    let first = store
+        .install_from_foreground(ForegroundPluginInstallRequest {
+            source_path: AbsolutePathBuf::try_from(first_source).unwrap(),
+            plugin_id: plugin_id.clone(),
+            plugin_version: None,
+            fallback_manifest_contents: None,
+        })
+        .expect("materialize initial setup plugin");
+    write_plugin_with_version(tmp.path(), "plain-source", "sample-plugin", Some("2.0.0"));
+
+    let err = store
+        .install(
+            AbsolutePathBuf::try_from(tmp.path().join("plain-source")).unwrap(),
+            plugin_id.clone(),
+        )
+        .expect_err("removing setup during an update must fail closed");
+
+    assert!(matches!(
+        err,
+        PluginStoreError::SetupCommandUpdateUnsupported { .. }
+    ));
+    assert_eq!(
+        store.active_plugin_version(&plugin_id).as_deref(),
+        Some(first.plugin_version.as_str())
+    );
+    assert_eq!(
+        fs::read(first.installed_path.join("scripts/setup.mjs")).unwrap(),
+        b"// original setup bytes"
+    );
+    assert!(!store.plugin_root(&plugin_id, "2.0.0").as_path().exists());
+}
+
 #[test]
 fn try_new_rejects_relative_codex_home() {
     let err = PluginStore::try_new(PathBuf::from("relative"))
@@ -159,6 +509,31 @@ fn plugin_data_root_derives_path_from_key() {
     assert_eq!(
         store.plugin_data_root(&plugin_id).as_path(),
         tmp.path().join("plugins/data/sample-debug")
+    );
+}
+
+#[test]
+fn setup_plugin_data_roots_cannot_collide_across_marketplaces() {
+    let tmp = tempdir().unwrap();
+    let store = PluginStore::new(tmp.path().to_path_buf());
+    let first = PluginId::new("foo-bar".to_string(), "baz".to_string()).unwrap();
+    let second = PluginId::new("foo".to_string(), "bar-baz".to_string()).unwrap();
+
+    assert_eq!(
+        store.plugin_data_root(&first),
+        store.plugin_data_root(&second)
+    );
+    assert_ne!(
+        store.plugin_setup_data_root(&first),
+        store.plugin_setup_data_root(&second)
+    );
+    assert_eq!(
+        store.plugin_setup_data_root(&first).as_path(),
+        tmp.path().join("plugins/data/setup/baz/foo-bar")
+    );
+    assert_eq!(
+        store.plugin_setup_data_root(&second).as_path(),
+        tmp.path().join("plugins/data/setup/bar-baz/foo")
     );
 }
 

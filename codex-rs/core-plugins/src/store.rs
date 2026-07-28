@@ -2,6 +2,11 @@ use crate::command_migration::migrate_plugin_commands;
 use crate::manifest::PluginManifest;
 use crate::manifest::load_plugin_manifest;
 use crate::manifest::parse_plugin_manifest;
+use crate::setup_install::ForegroundPluginInstallLock;
+use crate::setup_install::PluginCacheReadLock;
+use crate::setup_install::SETUP_CACHE_VERSION_PREFIX;
+use crate::setup_install::prepare_setup_completion_marker;
+use crate::setup_install::setup_cache_version;
 use codex_plugin::PluginId;
 use codex_plugin::validate_plugin_segment;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -22,6 +27,10 @@ pub const PLUGINS_CACHE_DIR: &str = "plugins/cache";
 pub const PLUGINS_DATA_DIR: &str = "plugins/data";
 const REMOTE_PLUGIN_INSTALL_METADATA_FILE: &str = ".codex-remote-plugin-install.json";
 const REMOTE_PLUGIN_INSTALL_METADATA_SCHEMA_VERSION: u8 = 1;
+
+mod setup_policy;
+pub(crate) use setup_policy::ForegroundPluginInstallRequest;
+use setup_policy::SetupInstallPolicy;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct RemotePluginInstallMetadata {
@@ -91,6 +100,12 @@ enum InstallManifest<'a> {
     Fallback(&'a str),
 }
 
+#[derive(Clone, Copy)]
+enum InstallCacheVersion<'a> {
+    Declared(&'a str),
+    SetupContentAddressed,
+}
+
 impl PluginStore {
     pub fn new(codex_home: PathBuf) -> Self {
         Self::try_new(codex_home)
@@ -121,6 +136,20 @@ impl PluginStore {
         &self.codex_home
     }
 
+    pub(crate) fn acquire_mutation_lock(
+        &self,
+        plugin_id: &PluginId,
+    ) -> Result<ForegroundPluginInstallLock, PluginStoreError> {
+        ForegroundPluginInstallLock::acquire(self.codex_home.as_path(), plugin_id)
+    }
+
+    pub(crate) fn try_acquire_read_lock(
+        &self,
+        plugin_id: &PluginId,
+    ) -> Result<Option<PluginCacheReadLock>, PluginStoreError> {
+        PluginCacheReadLock::try_acquire(self.codex_home.as_path(), plugin_id)
+    }
+
     pub fn plugin_base_root(&self, plugin_id: &PluginId) -> AbsolutePathBuf {
         self.root
             .join(&plugin_id.marketplace_name)
@@ -138,6 +167,13 @@ impl PluginStore {
         ))
     }
 
+    pub(crate) fn plugin_setup_data_root(&self, plugin_id: &PluginId) -> AbsolutePathBuf {
+        self.data_root
+            .join("setup")
+            .join(&plugin_id.marketplace_name)
+            .join(&plugin_id.plugin_name)
+    }
+
     pub fn active_plugin_version(&self, plugin_id: &PluginId) -> Option<String> {
         let mut discovered_versions = fs::read_dir(self.plugin_base_root(plugin_id).as_path())
             .ok()?
@@ -146,7 +182,7 @@ impl PluginStore {
                 entry.file_type().ok().filter(std::fs::FileType::is_dir)?;
                 entry.file_name().into_string().ok()
             })
-            .filter(|version| validate_plugin_version_segment(version).is_ok())
+            .filter(|version| validate_plugin_cache_version_segment(version).is_ok())
             .collect::<Vec<_>>();
         discovered_versions.sort_unstable_by(|left, right| compare_plugin_versions(left, right));
         if discovered_versions.is_empty() {
@@ -316,6 +352,27 @@ impl PluginStore {
         plugin_version: String,
         manifest: InstallManifest<'_>,
     ) -> Result<PluginInstallResult, PluginStoreError> {
+        let install_lock = self.acquire_mutation_lock(&plugin_id)?;
+        self.install_with_version_and_manifest_locked(
+            source_path,
+            plugin_id,
+            plugin_version,
+            manifest,
+            SetupInstallPolicy::Reject,
+            &install_lock,
+        )
+    }
+
+    fn install_with_version_and_manifest_locked(
+        &self,
+        source_path: AbsolutePathBuf,
+        plugin_id: PluginId,
+        plugin_version: String,
+        manifest: InstallManifest<'_>,
+        setup_policy: SetupInstallPolicy,
+        install_lock: &ForegroundPluginInstallLock,
+    ) -> Result<PluginInstallResult, PluginStoreError> {
+        install_lock.validate_plugin_id(&plugin_id)?;
         if !source_path.as_path().is_dir() {
             return Err(PluginStoreError::Invalid(format!(
                 "plugin source path is not a directory: {}",
@@ -324,21 +381,34 @@ impl PluginStore {
         }
 
         let manifest = resolve_install_manifest(source_path.as_path(), manifest);
-        let plugin_name = plugin_name_for_source(source_path.as_path(), manifest)?;
-        if plugin_name != plugin_id.plugin_name {
-            return Err(PluginStoreError::Invalid(format!(
-                "plugin.json name `{plugin_name}` does not match marketplace plugin name `{}`",
-                plugin_id.plugin_name
-            )));
-        }
+        let plugin_manifest = plugin_manifest_for_source(source_path.as_path(), manifest)?;
+        validate_plugin_manifest_name(&plugin_id, &plugin_manifest)?;
+        self.validate_setup_install(&plugin_id, &plugin_manifest, setup_policy)?;
         validate_plugin_version_segment(&plugin_version).map_err(PluginStoreError::Invalid)?;
-        let installed_path = self.plugin_root(&plugin_id, &plugin_version);
-        replace_plugin_root_atomically(
+        let cache_version = if matches!(
+            setup_policy,
+            SetupInstallPolicy::AllowForegroundFirstInstall
+        ) && plugin_manifest.setup.is_some()
+        {
+            InstallCacheVersion::SetupContentAddressed
+        } else {
+            InstallCacheVersion::Declared(&plugin_version)
+        };
+        let plugin_version = replace_plugin_root_atomically(
             source_path.as_path(),
             self.plugin_base_root(&plugin_id).as_path(),
-            &plugin_version,
+            cache_version,
             manifest,
+            |staged_root| {
+                self.validate_staged_install(
+                    &plugin_id,
+                    &plugin_manifest,
+                    staged_root,
+                    setup_policy,
+                )
+            },
         )?;
+        let installed_path = self.plugin_root(&plugin_id, &plugin_version);
         self.remove_remote_plugin_install_metadata(&plugin_id)?;
 
         Ok(PluginInstallResult {
@@ -349,6 +419,7 @@ impl PluginStore {
     }
 
     pub fn uninstall(&self, plugin_id: &PluginId) -> Result<(), PluginStoreError> {
+        let _install_lock = self.acquire_mutation_lock(plugin_id)?;
         remove_existing_target(self.plugin_base_root(plugin_id).as_path())
     }
 
@@ -384,17 +455,29 @@ pub enum PluginStoreError {
 
     #[error("{0}")]
     Invalid(String),
+
+    #[error(
+        "plugin `{plugin_key}` declares setup commands; enable `plugin_setup` and install it explicitly with `codex plugin add`"
+    )]
+    SetupCommandRequiresForeground { plugin_key: String },
+
+    #[error(
+        "automatic updates for setup-bearing plugin `{plugin_key}` are not supported; the existing plugin was preserved; remove and explicitly reinstall the plugin to approve its new setup"
+    )]
+    SetupCommandUpdateUnsupported { plugin_key: String },
 }
 
 impl PluginStoreError {
-    fn io(context: &'static str, source: io::Error) -> Self {
+    pub(crate) fn io(context: &'static str, source: io::Error) -> Self {
         Self::Io { context, source }
     }
 
     pub(crate) fn sub_error_type(&self) -> Option<String> {
         match self {
             Self::Io { context, .. } => Some(error_context_sub_error_type(context)),
-            Self::Invalid(_) => None,
+            Self::Invalid(_)
+            | Self::SetupCommandRequiresForeground { .. }
+            | Self::SetupCommandUpdateUnsupported { .. } => None,
         }
     }
 }
@@ -459,6 +542,22 @@ pub fn validate_plugin_version_segment(plugin_version: &str) -> Result<(), Strin
     Ok(())
 }
 
+fn validate_plugin_cache_version_segment(plugin_version: &str) -> Result<(), String> {
+    let Some(fingerprint) = plugin_version.strip_prefix(SETUP_CACHE_VERSION_PREFIX) else {
+        return validate_plugin_version_segment(plugin_version);
+    };
+    if fingerprint.len() == 64
+        && fingerprint
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "invalid internal setup cache version: expected `{SETUP_CACHE_VERSION_PREFIX}` followed by 64 lowercase hexadecimal characters"
+    ))
+}
+
 fn plugin_manifest_for_source(
     source_path: &Path,
     manifest: InstallManifest<'_>,
@@ -514,16 +613,19 @@ fn plugin_manifest_version_for_source(
     Ok(Some(version.to_string()))
 }
 
-fn plugin_name_for_source(
-    source_path: &Path,
-    manifest: InstallManifest<'_>,
-) -> Result<String, PluginStoreError> {
-    let manifest = plugin_manifest_for_source(source_path, manifest)?;
-
-    let plugin_name = manifest.name;
-    validate_plugin_segment(&plugin_name, "plugin name")
-        .map_err(PluginStoreError::Invalid)
-        .map(|_| plugin_name)
+fn validate_plugin_manifest_name(
+    plugin_id: &PluginId,
+    plugin_manifest: &PluginManifest,
+) -> Result<(), PluginStoreError> {
+    let plugin_name = &plugin_manifest.name;
+    validate_plugin_segment(plugin_name, "plugin name").map_err(PluginStoreError::Invalid)?;
+    if plugin_name != &plugin_id.plugin_name {
+        return Err(PluginStoreError::Invalid(format!(
+            "plugin.json name `{plugin_name}` does not match marketplace plugin name `{}`",
+            plugin_id.plugin_name
+        )));
+    }
+    Ok(())
 }
 
 fn remove_existing_target(path: &Path) -> Result<(), PluginStoreError> {
@@ -545,9 +647,10 @@ fn remove_existing_target(path: &Path) -> Result<(), PluginStoreError> {
 fn replace_plugin_root_atomically(
     source: &Path,
     target_root: &Path,
-    plugin_version: &str,
+    cache_version: InstallCacheVersion<'_>,
     manifest: InstallManifest<'_>,
-) -> Result<(), PluginStoreError> {
+    validate_staged: impl FnOnce(&Path) -> Result<(), PluginStoreError>,
+) -> Result<String, PluginStoreError> {
     let Some(parent) = target_root.parent() else {
         return Err(PluginStoreError::Invalid(format!(
             "plugin cache path has no parent: {}",
@@ -571,7 +674,7 @@ fn replace_plugin_root_atomically(
             PluginStoreError::io("failed to create temporary plugin cache directory", err)
         })?;
     let staged_root = staged_dir.path().join(plugin_dir_name);
-    let staged_version_root = staged_root.join(plugin_version);
+    let staged_version_root = staged_root.join("@candidate");
     copy_dir_recursive(source, &staged_version_root)?;
     if let InstallManifest::Fallback(contents) = manifest {
         // Inject the generated manifest into Store's existing atomic copy so install does not
@@ -592,13 +695,25 @@ fn replace_plugin_root_atomically(
         tracing::warn!(%err, "failed to migrate plugin commands into skills");
     }
 
-    let target_version_root = target_root.join(plugin_version);
+    prepare_setup_completion_marker(&staged_version_root)?;
+    validate_staged(&staged_version_root)?;
+    let plugin_version = match cache_version {
+        InstallCacheVersion::Declared(plugin_version) => plugin_version.to_string(),
+        InstallCacheVersion::SetupContentAddressed => setup_cache_version(&staged_version_root)?,
+    };
+    validate_plugin_cache_version_segment(&plugin_version).map_err(PluginStoreError::Invalid)?;
+    let finalized_staged_version_root = staged_root.join(&plugin_version);
+    fs::rename(&staged_version_root, &finalized_staged_version_root).map_err(|err| {
+        PluginStoreError::io("failed to finalize staged plugin cache version", err)
+    })?;
+
+    let target_version_root = target_root.join(&plugin_version);
     if target_root.exists() && !target_version_root.exists() {
-        fs::rename(&staged_version_root, &target_version_root).map_err(|err| {
+        fs::rename(&finalized_staged_version_root, &target_version_root).map_err(|err| {
             PluginStoreError::io("failed to activate updated plugin cache version", err)
         })?;
-        remove_old_plugin_versions(target_root, plugin_version)?;
-        return Ok(());
+        remove_old_plugin_versions(target_root, &plugin_version)?;
+        return Ok(plugin_version);
     }
 
     if target_root.exists() {
@@ -634,7 +749,7 @@ fn replace_plugin_root_atomically(
             .map_err(|err| PluginStoreError::io("failed to activate plugin cache entry", err))?;
     }
 
-    Ok(())
+    Ok(plugin_version)
 }
 
 fn remove_old_plugin_versions(
@@ -655,7 +770,7 @@ fn remove_old_plugin_versions(
         let Ok(version) = entry.file_name().into_string() else {
             continue;
         };
-        if version == plugin_version || validate_plugin_version_segment(&version).is_err() {
+        if version == plugin_version || validate_plugin_cache_version_segment(&version).is_err() {
             continue;
         }
 

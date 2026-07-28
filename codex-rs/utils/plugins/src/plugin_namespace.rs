@@ -37,6 +37,16 @@ pub fn agent_plugin_schema_status(contents: &str) -> AgentPluginSchemaStatus {
 }
 
 pub fn find_plugin_manifest_path(plugin_root: &Path) -> Option<PathBuf> {
+    let portable_manifest_path = plugin_root.join(AGENT_PLUGIN_MANIFEST_RELATIVE_PATH);
+    if std::fs::read_to_string(&portable_manifest_path)
+        .ok()
+        .is_some_and(|contents| {
+            agent_plugin_schema_status(&contents) == AgentPluginSchemaStatus::Supported
+        })
+    {
+        return Some(portable_manifest_path);
+    }
+
     DISCOVERABLE_PLUGIN_MANIFEST_PATHS
         .iter()
         .map(|relative_path| plugin_root.join(relative_path))
@@ -105,6 +115,7 @@ pub async fn plugin_namespace_for_skill_uri(
 
 #[cfg(test)]
 mod tests {
+    use super::AGENT_PLUGIN_SCHEMA_URI;
     use super::find_plugin_manifest_path;
     use super::plugin_namespace_for_skill_path;
     use codex_exec_server::LOCAL_FS;
@@ -187,6 +198,38 @@ mod tests {
         fs::write(&legacy_path, r#"{"name":"sample"}"#).expect("write legacy");
 
         assert_eq!(find_plugin_manifest_path(&plugin_root), Some(legacy_path));
+    }
+
+    #[test]
+    fn prefers_supported_portable_manifest_over_legacy_overlay() {
+        let tmp = tempdir().expect("tempdir");
+        let plugin_root = tmp.path().join("plugins/sample");
+        let portable_path = plugin_root.join("plugin.json");
+        let legacy_path = plugin_root.join(".codex-plugin/plugin.json");
+        fs::create_dir_all(legacy_path.parent().expect("parent")).expect("mkdir");
+        fs::write(
+            &portable_path,
+            format!(r#"{{"$schema":"{AGENT_PLUGIN_SCHEMA_URI}","name":"sample"}}"#),
+        )
+        .expect("write portable manifest");
+        fs::write(&legacy_path, r#"{"name":"legacy-overlay"}"#).expect("write overlay");
+
+        assert_eq!(find_plugin_manifest_path(&plugin_root), Some(portable_path));
+    }
+
+    #[test]
+    fn discovers_supported_portable_manifest_without_legacy_overlay() {
+        let tmp = tempdir().expect("tempdir");
+        let plugin_root = tmp.path().join("plugins/sample");
+        let portable_path = plugin_root.join("plugin.json");
+        fs::create_dir_all(&plugin_root).expect("create plugin root");
+        fs::write(
+            &portable_path,
+            format!(r#"{{"$schema":"{AGENT_PLUGIN_SCHEMA_URI}","name":"sample"}}"#),
+        )
+        .expect("write portable manifest");
+
+        assert_eq!(find_plugin_manifest_path(&plugin_root), Some(portable_path));
     }
 
     #[test]

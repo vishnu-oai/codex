@@ -3,6 +3,7 @@ use super::PluginLoadOutcome;
 use crate::app_mcp_routing::apply_app_mcp_routing_policy;
 use crate::installed_marketplaces::installed_marketplace_roots_from_layer_stack;
 use crate::is_openai_curated_marketplace_name;
+use crate::loader::PLUGIN_CACHE_MUTATION_IN_PROGRESS_ERROR;
 use crate::loader::PluginHookLoadOutcome;
 use crate::loader::TargetCuratedMarketplace;
 use crate::loader::configured_curated_plugin_ids_from_codex_home;
@@ -118,6 +119,11 @@ use tracing::warn;
 static CURATED_REPO_SYNC_STARTED: AtomicBool = AtomicBool::new(false);
 const FEATURED_PLUGIN_IDS_CACHE_TTL: std::time::Duration =
     std::time::Duration::from_secs(60 * 60 * 3);
+
+mod setup_lifecycle;
+pub use setup_lifecycle::ForegroundPluginInstallOutcome;
+pub use setup_lifecycle::InstalledPluginSetup;
+pub use setup_lifecycle::PendingPluginSetup;
 
 type EffectivePluginsChangedCallback = Arc<dyn Fn(EffectivePluginsChange) + Send + Sync + 'static>;
 
@@ -692,12 +698,17 @@ impl PluginsManager {
         )
         .await;
         log_plugin_load_errors(&plugins);
-        self.cache_loaded_plugins_if_current(
-            cache_generation,
-            cache_key,
-            plugins.clone(),
-            plugin_skill_snapshots,
-        );
+        if plugins
+            .iter()
+            .all(|plugin| plugin.error.as_deref() != Some(PLUGIN_CACHE_MUTATION_IN_PROGRESS_ERROR))
+        {
+            self.cache_loaded_plugins_if_current(
+                cache_generation,
+                cache_key,
+                plugins.clone(),
+                plugin_skill_snapshots,
+            );
+        }
         self.resolve_loaded_plugins_for_auth(plugins, &config.model_provider_id)
     }
 
@@ -1637,6 +1648,14 @@ impl PluginsManager {
         .await
         .map_err(PluginInstallError::join)??;
 
+        self.activate_store_install(result, auth_policy).await
+    }
+
+    async fn activate_store_install(
+        &self,
+        result: StorePluginInstallResult,
+        auth_policy: MarketplacePluginAuthPolicy,
+    ) -> Result<PluginInstallOutcome, PluginInstallError> {
         set_user_plugin_enabled(
             &self.codex_home,
             result.plugin_id.as_key(),
@@ -1756,20 +1775,37 @@ impl PluginsManager {
                         let plugin_id =
                             PluginId::new(plugin.name.clone(), marketplace_name.clone()).ok();
                         let installed = installed_plugins.contains(&plugin_key);
-                        let installed_version = installed.then_some(()).and_then(|_| {
+                        let installed_manifest = if installed {
                             plugin_id
                                 .as_ref()
-                                .and_then(|plugin_id| self.store.active_plugin_version(plugin_id))
-                        });
+                                .and_then(|plugin_id| self.store.active_plugin_root(plugin_id))
+                                .and_then(|plugin_root| load_plugin_manifest(plugin_root.as_path()))
+                        } else {
+                            None
+                        };
+                        let installed_version = if installed {
+                            if let Some(manifest) = installed_manifest
+                                .as_ref()
+                                .filter(|manifest| manifest.setup.is_some())
+                            {
+                                Some(manifest.version.clone().unwrap_or_else(|| {
+                                    crate::store::DEFAULT_PLUGIN_VERSION.to_string()
+                                }))
+                            } else {
+                                plugin_id.as_ref().and_then(|plugin_id| {
+                                    self.store.active_plugin_version(plugin_id)
+                                })
+                            }
+                        } else {
+                            None
+                        };
                         let enabled = enabled_plugins.contains(&plugin_key);
                         let mut interface = plugin.interface;
                         let mut local_version = plugin.local_version;
                         let manifest_fallback = plugin.manifest_fallback.clone();
                         if installed
                             && plugin.source.is_install_materialized()
-                            && let Some(plugin_id) = plugin_id.as_ref()
-                            && let Some(plugin_root) = self.store.active_plugin_root(plugin_id)
-                            && let Some(manifest) = load_plugin_manifest(plugin_root.as_path())
+                            && let Some(manifest) = installed_manifest
                         {
                             local_version = manifest.version.clone();
                             let marketplace_category = interface
@@ -2034,7 +2070,11 @@ impl PluginsManager {
             Arc::clone(&self.skill_root_scan_slots),
         )
         .await;
-        let plugin_data_root = self.store.plugin_data_root(&plugin_id);
+        let plugin_data_root = if manifest.setup.is_some() {
+            self.store.plugin_setup_data_root(&plugin_id)
+        } else {
+            self.store.plugin_data_root(&plugin_id)
+        };
         let (hook_sources, _hook_load_warnings) =
             load_plugin_hooks(&source_path, &plugin_id, &plugin_data_root, &manifest.paths);
         let hooks = plugin_hook_declarations(&hook_sources)
@@ -2985,6 +3025,15 @@ pub enum PluginInstallError {
     #[error("{0}")]
     Config(#[from] anyhow::Error),
 
+    #[error(
+        "plugin `{plugin_name}@{marketplace_name}` is configured but {state}; remove it, then explicitly reinstall and approve setup"
+    )]
+    ConfiguredSetupReinstallRequired {
+        plugin_name: String,
+        marketplace_name: String,
+        state: &'static str,
+    },
+
     #[error("failed to join plugin install task: {0}")]
     Join(#[from] tokio::task::JoinError),
 }
@@ -3003,14 +3052,22 @@ impl PluginInstallError {
                     | MarketplaceError::PluginNotFound { .. }
                     | MarketplaceError::PluginNotAvailable { .. }
                     | MarketplaceError::InvalidPlugin(_)
-            ) | Self::Store(PluginStoreError::Invalid(_))
+            ) | Self::Store(
+                PluginStoreError::Invalid(_)
+                    | PluginStoreError::SetupCommandRequiresForeground { .. }
+                    | PluginStoreError::SetupCommandUpdateUnsupported { .. }
+            ) | Self::ConfiguredSetupReinstallRequired { .. }
         )
     }
 
     pub fn sub_error_type(&self) -> Option<String> {
         match self {
             Self::Store(err) => err.sub_error_type(),
-            Self::Marketplace(_) | Self::Remote(_) | Self::Config(_) | Self::Join(_) => None,
+            Self::Marketplace(_)
+            | Self::Remote(_)
+            | Self::Config(_)
+            | Self::ConfiguredSetupReinstallRequired { .. }
+            | Self::Join(_) => None,
         }
     }
 }
@@ -3021,6 +3078,9 @@ fn plugin_install_error_type(err: &PluginInstallError) -> &'static str {
         PluginInstallError::Remote(err) => remote_plugin_mutation_error_type(err),
         PluginInstallError::Store(err) => plugin_store_error_type(err),
         PluginInstallError::Config(_) => "config",
+        PluginInstallError::ConfiguredSetupReinstallRequired { .. } => {
+            "configured_setup_reinstall_required"
+        }
         PluginInstallError::Join(_) => "join",
     }
 }
@@ -3060,6 +3120,12 @@ fn plugin_store_error_type(err: &PluginStoreError) -> &'static str {
     match err {
         PluginStoreError::Io { .. } => "store_io",
         PluginStoreError::Invalid(_) => "store_invalid",
+        PluginStoreError::SetupCommandRequiresForeground { .. } => {
+            "store_setup_command_requires_foreground"
+        }
+        PluginStoreError::SetupCommandUpdateUnsupported { .. } => {
+            "store_setup_command_update_unsupported"
+        }
     }
 }
 

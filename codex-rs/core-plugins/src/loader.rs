@@ -17,7 +17,9 @@ use crate::remote::REMOTE_GLOBAL_MARKETPLACE_NAME;
 use crate::remote::RemoteInstalledPlugin;
 use crate::remote_plugin_id_resolver::RemoteInstalledPluginsSnapshot;
 use crate::remote_plugin_id_resolver::RemotePluginIdResolver;
+use crate::setup_install::validate_setup_completion_marker;
 use crate::store::PluginStore;
+use crate::store::PluginStoreError;
 use crate::store::plugin_version_for_source;
 use crate::store::plugin_version_for_source_with_fallback_manifest;
 use codex_config::ConfigLayerStack;
@@ -68,6 +70,8 @@ const DEFAULT_MCP_CONFIG_FILE: &str = ".mcp.json";
 const DEFAULT_APP_CONFIG_FILE: &str = ".app.json";
 const CONFIG_TOML_FILE: &str = "config.toml";
 const CURATED_PLUGIN_CACHE_VERSION_SHA_PREFIX_LEN: usize = 8;
+pub(crate) const PLUGIN_CACHE_MUTATION_IN_PROGRESS_ERROR: &str =
+    "plugin cache mutation is in progress";
 
 /// Hook declarations and warnings resolved without loading other plugin capabilities.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -426,15 +430,28 @@ pub fn refresh_curated_plugin_cache(
             continue;
         }
 
-        store
-            .install_with_version(source_path, plugin_id.clone(), cache_plugin_version.clone())
-            .map_err(|err| {
-                format!(
+        match store.install_with_version(
+            source_path,
+            plugin_id.clone(),
+            cache_plugin_version.clone(),
+        ) {
+            Ok(_) => cache_refreshed = true,
+            Err(
+                PluginStoreError::SetupCommandRequiresForeground { .. }
+                | PluginStoreError::SetupCommandUpdateUnsupported { .. },
+            ) => {
+                warn!(
+                    plugin = %plugin_id.as_key(),
+                    "skipping setup-bearing plugin during background curated refresh"
+                );
+            }
+            Err(err) => {
+                return Err(format!(
                     "failed to refresh curated plugin cache for {}: {err}",
                     plugin_id.as_key()
-                )
-            })?;
-        cache_refreshed = true;
+                ));
+            }
+        }
     }
 
     Ok(cache_refreshed)
@@ -628,6 +645,17 @@ fn refresh_non_curated_plugin_cache_with_mode(
             );
             continue;
         };
+        if store
+            .active_plugin_root(&plugin_id)
+            .and_then(|root| load_plugin_manifest(root.as_path()))
+            .is_some_and(|manifest| manifest.setup.is_some())
+        {
+            warn!(
+                plugin = %plugin_key,
+                "preserving setup-bearing plugin during background marketplace refresh"
+            );
+            continue;
+        }
         let refresh_result = (|| -> Result<bool, String> {
             let materialized =
                 materialize_marketplace_plugin_source(codex_home, &source).map_err(|err| {
@@ -650,7 +678,7 @@ fn refresh_non_curated_plugin_cache_with_mode(
                 return Ok(false);
             }
 
-            match manifest_fallback_contents.as_deref() {
+            let install = match manifest_fallback_contents.as_deref() {
                 Some(manifest_contents) => store.install_with_version_and_fallback_manifest(
                     source_path,
                     plugin_id.clone(),
@@ -658,9 +686,23 @@ fn refresh_non_curated_plugin_cache_with_mode(
                     manifest_contents,
                 ),
                 None => store.install_with_version(source_path, plugin_id.clone(), plugin_version),
+            };
+            match install {
+                Ok(_) => Ok(true),
+                Err(
+                    PluginStoreError::SetupCommandRequiresForeground { .. }
+                    | PluginStoreError::SetupCommandUpdateUnsupported { .. },
+                ) => {
+                    warn!(
+                        plugin = %plugin_key,
+                        "preserving existing plugin because its updated package requires explicitly approved setup"
+                    );
+                    Ok(false)
+                }
+                Err(error) => Err(format!(
+                    "failed to refresh plugin cache for {plugin_key}: {error}"
+                )),
             }
-            .map_err(|err| format!("failed to refresh plugin cache for {plugin_key}: {err}"))?;
-            Ok(true)
         })();
         match refresh_result {
             Ok(refreshed) => cache_refreshed |= refreshed,
@@ -796,6 +838,39 @@ async fn load_plugin(
     scope: &PluginLoadScope<'_>,
 ) -> LoadedPlugin<McpServerConfig> {
     let plugin_id = PluginId::parse(&config_name);
+    let setup_requires_cache_lock = plugin.enabled
+        && plugin_id
+            .as_ref()
+            .ok()
+            .and_then(|plugin_id| store.active_plugin_root(plugin_id))
+            .and_then(|root| load_plugin_manifest(root.as_path()))
+            .is_some_and(|manifest| manifest.setup.is_some());
+    let (load_lock, load_lock_error) = if setup_requires_cache_lock {
+        match plugin_id.as_ref() {
+            Ok(plugin_id) => {
+                let store = store.clone();
+                let plugin_id = plugin_id.clone();
+                match tokio::task::spawn_blocking(move || store.try_acquire_read_lock(&plugin_id))
+                    .await
+                {
+                    Ok(Ok(Some(lock))) => (Some(lock), None),
+                    Ok(Ok(None)) => (
+                        None,
+                        Some(PLUGIN_CACHE_MUTATION_IN_PROGRESS_ERROR.to_string()),
+                    ),
+                    Ok(Err(err)) => (None, Some(err.to_string())),
+                    Err(err) => (
+                        None,
+                        Some(format!("failed to join plugin cache lock task: {err}")),
+                    ),
+                }
+            }
+            Err(_) => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+    let _load_lock = load_lock;
     let active_plugin_installation = plugin_id
         .as_ref()
         .ok()
@@ -826,6 +901,10 @@ async fn load_plugin(
     };
 
     if !plugin.enabled {
+        return loaded_plugin;
+    }
+    if let Some(error) = load_lock_error {
+        loaded_plugin.error = Some(error);
         return loaded_plugin;
     }
 
@@ -862,6 +941,12 @@ async fn load_plugin(
         loaded_plugin.error = Some("missing or invalid plugin.json".to_string());
         return loaded_plugin;
     };
+    if manifest.setup.is_some()
+        && let Err(err) = validate_setup_completion_marker(plugin_root.as_path())
+    {
+        loaded_plugin.error = Some(err.to_string());
+        return loaded_plugin;
+    }
 
     let manifest_paths = &manifest.paths;
     loaded_plugin.plugin_namespace = Some(manifest.name.clone());
@@ -903,10 +988,15 @@ async fn load_plugin(
         }
         PluginLoadScope::HooksOnly => {}
     }
+    let plugin_data_root = if manifest.setup.is_some() {
+        store.plugin_setup_data_root(&loaded_plugin_id)
+    } else {
+        store.plugin_data_root(&loaded_plugin_id)
+    };
     let (hook_sources, hook_load_warnings) = load_plugin_hooks(
         &plugin_root,
         &loaded_plugin_id,
-        &store.plugin_data_root(&loaded_plugin_id),
+        &plugin_data_root,
         manifest_paths,
     );
     loaded_plugin.hook_sources = hook_sources;

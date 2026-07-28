@@ -18,6 +18,46 @@
   "hooks": "./hooks.json",
   "mcpServers": "./.mcp.json",
   "apps": "./.app.json",
+  "setup": {
+    "inputs": [
+      {
+        "id": "project_root",
+        "type": "directory",
+        "prompt": "Where is your project directory?",
+        "env": "CUSTOMER_PROJECT_ROOT",
+        "required": true
+      },
+      {
+        "id": "config_file",
+        "type": "file",
+        "prompt": "Where is your configuration file?",
+        "env": "CUSTOMER_CONFIG_FILE",
+        "required": true
+      },
+      {
+        "id": "api_key",
+        "type": "secret",
+        "prompt": "Enter your MCP API key",
+        "env": "CUSTOMER_MCP_API_KEY",
+        "required": true
+      }
+    ],
+    "commands": [
+      {
+        "name": "authenticate",
+        "command": ["python3", "./scripts/authenticate.py"],
+        "interactive": true
+      },
+      {
+        "name": "write local configuration",
+        "command": ["python3", "./scripts/configure.py"]
+      },
+      {
+        "name": "verify MCP connection",
+        "command": ["python3", "./scripts/verify.py"]
+      }
+    ]
+  },
   "interface": {
     "displayName": "Plugin Display Name",
     "shortDescription": "Short description for subtitle",
@@ -65,6 +105,8 @@
 - `hooks` (`string`): Hook config path.
 - `mcpServers` (`string` or `object`): MCP config path, or an object whose keys are MCP server names and whose values are MCP server config objects.
 - `apps` (`string`): App manifest path for plugin integrations.
+- `setup` (`object`, optional): Opt-in, foreground CLI setup inputs and
+  directly executed commands; see Experimental CLI plugin setup below.
 - `interface` (`object`): Interface/UX metadata block for plugin presentation.
 
 `mcpServers` may be declared as a companion file path:
@@ -87,6 +129,87 @@ Or as an object directly in `plugin.json`:
   }
 }
 ```
+
+### Experimental CLI plugin setup
+
+Declare `setup` only when the plugin needs explicit first-install work, such as
+generating an API key, collecting customer-specific paths, running an existing OAuth
+login command, or writing local configuration. Setup is opt-in, disabled by
+default, and currently available only in a foreground Unix CLI:
+
+```bash
+codex features enable plugin_setup
+codex plugin add plugin-name@marketplace
+```
+
+Codex prints all declared commands, asks for approval, collects missing inputs
+directly in the same terminal, and runs the steps in their declared order. It does
+not open the Codex TUI or start an agent turn.
+
+Each `setup.inputs` entry has:
+
+- `id`: a unique ASCII input name used by `--set`.
+- `type`: `text`, `directory`, `file`, or `secret`.
+- `prompt`: the terminal question for a missing value.
+- `env`: the unique environment variable passed to every setup step.
+- `required`: whether a value is mandatory; the default is `true`.
+
+Codex resolves file and directory inputs to existing absolute paths. Secret
+values come from their declared environment variable or a hidden terminal
+prompt; they are rejected in `--set` to keep them out of shell history and
+process arguments.
+
+Each `setup.commands` entry has:
+
+- `name`: a unique human-readable step name.
+- `command`: an executable-and-arguments array, never shell-evaluated.
+- `interactive`: set `true` when the approved script needs the terminal
+  for additional questions or authentication; the default is `false`.
+
+Interactive commands require a real terminal for standard input, standard output,
+and standard error. They receive the foreground terminal directly, so OAuth tools
+and other authentication programs can prompt normally. Redirecting or piping any
+of those streams is rejected. Their terminal output cannot be captured or
+redacted; do not print credentials. Non-interactive command output is bounded,
+sanitized, and redacted.
+
+Every setup command inherits the invoking process environment and receives
+`PLUGIN_ROOT`, `PLUGIN_DATA`, `CLAUDE_PLUGIN_ROOT`,
+`CLAUDE_PLUGIN_DATA`, and the collected input environment variables.
+Write generated files, tokens, and configuration under `PLUGIN_DATA` or
+another explicitly selected location. `PLUGIN_ROOT` is the immutable
+approved package; mutating it prevents setup from completing. Environment
+changes made inside one command do not automatically persist to the parent
+shell or the next command; use `PLUGIN_DATA` for state shared across steps.
+
+For a non-interactive install, explicitly approve the plan, provide ordinary
+inputs with `--set`, and put secrets in environment variables:
+
+```bash
+export CUSTOMER_MCP_API_KEY="your-api-key"
+
+codex plugin add plugin-name@marketplace \
+  --run-setup \
+  --set project_root=/absolute/path/to/project \
+  --set config_file=/absolute/path/to/config.yaml
+```
+
+An already-installed plugin can be configured again:
+
+```bash
+codex plugin setup plugin-name@marketplace
+
+codex plugin setup plugin-name@marketplace \
+  --yes \
+  --set project_root=/absolute/path/to/project \
+  --set config_file=/absolute/path/to/config.yaml
+```
+
+JSON output and unattended use require explicit approval and cannot run
+`interactive` commands. A setup failure leaves a first installation inactive.
+Background refreshes, marketplace updates, and desktop-app installs never run
+setup. When a new plugin version changes its setup, remove and explicitly
+reinstall the plugin so the new package and commands receive fresh approval.
 
 ### `interface` fields
 

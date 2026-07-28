@@ -52,6 +52,7 @@ mod exec_server_telemetry;
 mod marketplace_cmd;
 mod mcp_cmd;
 mod plugin_cmd;
+mod plugin_setup;
 mod remote_control_cmd;
 #[cfg(target_os = "windows")]
 mod sandbox_setup;
@@ -1090,6 +1091,12 @@ async fn cli_main(
                 PluginSubcommand::Marketplace(mut marketplace_cli) => {
                     prepend_config_flags(&mut marketplace_cli.config_overrides, config_overrides);
                     marketplace_cli.run().await?;
+                }
+                PluginSubcommand::Setup(args) => {
+                    let overrides = config_overrides
+                        .parse_overrides()
+                        .map_err(anyhow::Error::msg)?;
+                    plugin_cmd::run_plugin_setup(overrides, args).await?;
                 }
                 PluginSubcommand::Remove(args) => {
                     let overrides = config_overrides

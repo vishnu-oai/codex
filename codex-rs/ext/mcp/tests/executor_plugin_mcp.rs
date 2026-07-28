@@ -150,6 +150,114 @@ async fn selected_plugin_package_is_contributed_without_servers_or_connectors() 
 }
 
 #[tokio::test]
+async fn setup_plugin_contributes_no_mcp_or_connectors_in_either_discovery_mode() -> TestResult {
+    let codex_home = tempfile::tempdir()?;
+    let plugin_root = tempfile::tempdir()?;
+    std::fs::create_dir_all(plugin_root.path().join(".codex-plugin"))?;
+    std::fs::write(
+        plugin_root.path().join(".codex-plugin/plugin.json"),
+        r#"{
+  "name": "setup-plugin",
+  "setup": {
+    "commands": [{"name": "configure", "command": ["python3", "./setup.py"]}]
+  },
+  "mcpServers": "./.mcp.json",
+  "apps": "./.app.json"
+}"#,
+    )?;
+    std::fs::write(
+        plugin_root.path().join(".mcp.json"),
+        r#"{"mcpServers":{"unapproved":{"command":"must-not-run"}}}"#,
+    )?;
+    std::fs::write(
+        plugin_root.path().join(".app.json"),
+        r#"{"apps":{"unapproved":{"id":"connector_unapproved"}}}"#,
+    )?;
+    let mut config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
+
+    assert!(
+        raw_selected_plugin_contributions(&config, plugin_root.path())
+            .await?
+            .is_empty()
+    );
+
+    config
+        .features
+        .enable(Feature::ExecutorCapabilityDiscovery)
+        .expect("enable bundled executor capability discovery");
+    assert!(
+        raw_selected_plugin_contributions(&config, plugin_root.path())
+            .await?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn portable_inline_setup_contributes_no_mcp_or_connectors_in_either_discovery_mode()
+-> TestResult {
+    let codex_home = tempfile::tempdir()?;
+    let plugin_root = tempfile::tempdir()?;
+    std::fs::create_dir_all(plugin_root.path().join(".codex-plugin"))?;
+    std::fs::write(
+        plugin_root.path().join("plugin.json"),
+        r#"{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "portable-setup-plugin",
+  "extensions": {
+    "com.openai": {
+      "setup": {
+        "commands": [{"name": "authenticate", "command": ["python3", "./setup.py"]}]
+      }
+    }
+  }
+}"#,
+    )?;
+    std::fs::write(
+        plugin_root.path().join(".codex-plugin/plugin.json"),
+        r#"{
+  "name": "portable-setup-plugin",
+  "mcpServers": "./.mcp.json",
+  "apps": "./.app.json"
+}"#,
+    )?;
+    std::fs::write(
+        plugin_root.path().join(".mcp.json"),
+        r#"{"mcpServers":{"unapproved":{"command":"must-not-run"}}}"#,
+    )?;
+    std::fs::write(
+        plugin_root.path().join(".app.json"),
+        r#"{"apps":{"unapproved":{"id":"connector_unapproved"}}}"#,
+    )?;
+    let mut config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
+
+    assert!(
+        raw_selected_plugin_contributions(&config, plugin_root.path())
+            .await?
+            .is_empty()
+    );
+
+    config
+        .features
+        .enable(Feature::ExecutorCapabilityDiscovery)
+        .expect("enable bundled executor capability discovery");
+    assert!(
+        raw_selected_plugin_contributions(&config, plugin_root.path())
+            .await?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn high_level_discovery_matches_the_existing_plugin_provider() -> TestResult {
     let codex_home = tempfile::tempdir()?;
     let plugin_root = tempfile::tempdir()?;

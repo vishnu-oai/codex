@@ -169,6 +169,22 @@ impl McpServerContributor<Config> for SelectedExecutorPluginMcpContributor {
                             continue;
                         }
                     };
+                    match self
+                        .plugin_provider
+                        .resolve_bound(&root.selected_root)
+                        .await
+                    {
+                        Ok(Some(_)) => {}
+                        Ok(None) => continue,
+                        Err(error) => {
+                            tracing::warn!(
+                                selected_root = root.selected_root.id,
+                                %error,
+                                "ignoring executor plugin that did not pass manifest setup validation"
+                            );
+                            continue;
+                        }
+                    }
                     let Some(plugin) =
                         discovery::metadata_from_discovery(&root.selected_root, discovery)
                     else {

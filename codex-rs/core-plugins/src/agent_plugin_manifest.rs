@@ -179,6 +179,11 @@ pub(super) fn parse_agent_plugin_manifest_uri(
     )?;
 
     if let Some(extension_contents) = codex_extension.as_deref() {
+        if let Some((overlay_path, overlay_contents)) = overlay {
+            let overlay_extension =
+                parse_legacy_plugin_manifest_uri(plugin_root, overlay_path, overlay_contents)?;
+            resolved.setup = overlay_extension.setup;
+        }
         apply_codex_agent_plugin_extension(
             &mut resolved,
             plugin_root,
@@ -208,6 +213,9 @@ fn apply_codex_agent_plugin_extension(
     contents: &str,
 ) -> Result<(), serde_json::Error> {
     let extension = parse_legacy_plugin_manifest_uri(plugin_root, source_path, contents)?;
+    if let Some(setup) = extension.setup {
+        resolved.setup = Some(setup);
+    }
     resolved.paths.apps = extension.paths.apps;
     resolved.paths.hooks = extension.paths.hooks;
     if extension.interface.is_some() {

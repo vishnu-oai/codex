@@ -44,6 +44,13 @@ pub(super) fn metadata_from_discovery(
             return None;
         }
     };
+    if manifest.setup.is_some() {
+        tracing::warn!(
+            selected_root = selected_root.id,
+            "ignoring executor plugin that requires explicitly approved foreground setup"
+        );
+        return None;
+    }
     let CapabilityRootLocation::Environment { environment_id, .. } = &selected_root.location;
     let servers = match manifest.paths.mcp_servers.as_ref() {
         Some(PluginManifestMcpServers::Object(contents)) => {

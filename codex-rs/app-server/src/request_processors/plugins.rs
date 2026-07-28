@@ -1982,6 +1982,9 @@ impl PluginRequestProcessor {
             CorePluginInstallError::Remote(err) => {
                 internal_error(format!("failed to enable remote plugin: {err}"))
             }
+            err @ CorePluginInstallError::ConfiguredSetupReinstallRequired { .. } => {
+                invalid_request(err.to_string())
+            }
             CorePluginInstallError::Join(err) => {
                 internal_error(format!("failed to install plugin: {err}"))
             }

@@ -20,6 +20,7 @@ use codex_plugin::ResolvedPlugin;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_utils_path_uri::PathUri;
+use codex_utils_plugins::AGENT_PLUGIN_SCHEMA_URI;
 use pretty_assertions::assert_eq;
 use std::fs;
 use std::io;
@@ -242,7 +243,8 @@ async fn plugin_root_resolution_uses_supplied_executor_file_system() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
         vec![
-            FileSystemCall::Metadata(plugin_root),
+            FileSystemCall::Metadata(plugin_root.clone()),
+            FileSystemCall::Metadata(plugin_root.join("plugin.json").unwrap()),
             FileSystemCall::Metadata(manifest_path.clone()),
             FileSystemCall::Read(manifest_path),
         ]
@@ -287,11 +289,93 @@ async fn plugin_root_resolution_accepts_foreign_executor_file_uri() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
         vec![
-            FileSystemCall::Metadata(plugin_root),
+            FileSystemCall::Metadata(plugin_root.clone()),
+            FileSystemCall::Metadata(plugin_root.join("plugin.json").unwrap()),
             FileSystemCall::Metadata(manifest_path.clone()),
             FileSystemCall::Read(manifest_path),
         ]
     );
+}
+
+#[tokio::test]
+async fn executor_plugin_rejects_unapproved_setup() {
+    let temp_dir = tempdir().expect("tempdir");
+    let plugin_root = temp_dir.path().join("setup-plugin");
+    write_manifest(
+        &plugin_root,
+        ".codex-plugin/plugin.json",
+        r#"{
+  "name": "setup-plugin",
+  "setup": {
+    "commands": [{"name": "configure", "command": ["python3", "./setup.py"]}]
+  },
+  "mcpServers": "./.mcp.json"
+}"#,
+    );
+    let provider = ExecutorPluginProvider::new(Arc::new(EnvironmentManager::default_for_tests()));
+
+    let error = provider
+        .resolve(&selected_root(
+            "setup-plugin",
+            LOCAL_ENVIRONMENT_ID,
+            &plugin_root,
+        ))
+        .await
+        .expect_err("executor plugins cannot bypass foreground setup");
+
+    assert!(matches!(
+        error,
+        ExecutorPluginProviderError::SetupRequiresForeground { root_id }
+            if root_id == "setup-plugin"
+    ));
+}
+
+#[tokio::test]
+async fn executor_plugin_rejects_portable_setup_hidden_by_legacy_overlay() {
+    let temp_dir = tempdir().expect("tempdir");
+    let plugin_root = temp_dir.path().join("setup-plugin");
+    write_manifest(
+        &plugin_root,
+        "plugin.json",
+        &format!(
+            r#"{{
+  "$schema": "{AGENT_PLUGIN_SCHEMA_URI}",
+  "name": "setup-plugin",
+  "extensions": {{
+    "com.openai": {{
+      "setup": {{
+        "commands": [{{"name": "configure", "command": ["python3", "./setup.py"]}}]
+      }}
+    }}
+  }}
+}}"#
+        ),
+    );
+    write_manifest(
+        &plugin_root,
+        ".codex-plugin/plugin.json",
+        r#"{
+  "name": "setup-plugin",
+  "mcpServers": "./.mcp.json",
+  "apps": "./.app.json"
+}"#,
+    );
+    let provider = ExecutorPluginProvider::new(Arc::new(EnvironmentManager::default_for_tests()));
+
+    let error = provider
+        .resolve(&selected_root(
+            "setup-plugin",
+            LOCAL_ENVIRONMENT_ID,
+            &plugin_root,
+        ))
+        .await
+        .expect_err("portable manifests cannot hide setup behind a legacy overlay");
+
+    assert!(matches!(
+        error,
+        ExecutorPluginProviderError::SetupRequiresForeground { root_id }
+            if root_id == "setup-plugin"
+    ));
 }
 
 #[tokio::test]

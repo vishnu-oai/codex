@@ -5,6 +5,7 @@ use clap::Parser;
 use codex_core::config::Config;
 use codex_core::config::find_codex_home;
 use codex_core_plugins::ConfiguredMarketplace;
+use codex_core_plugins::ForegroundPluginInstallOutcome;
 use codex_core_plugins::OPENAI_BUNDLED_MARKETPLACE_NAME;
 use codex_core_plugins::PluginInstallOutcome;
 use codex_core_plugins::PluginInstallRequest;
@@ -18,6 +19,7 @@ use codex_core_plugins::marketplace::MarketplacePluginAuthPolicy;
 use codex_core_plugins::marketplace::MarketplacePluginInstallPolicy;
 use codex_core_plugins::marketplace::MarketplacePluginSource;
 use codex_core_plugins::marketplace::find_marketplace_manifest_path;
+use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_login::auth::read_codex_api_key_from_env;
 use codex_plugin::PluginId;
@@ -30,6 +32,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::marketplace_cmd::MarketplaceCli;
+use crate::plugin_setup;
 
 const OPENAI_BUNDLED_ALPHA_MARKETPLACE_NAME: &str = "openai-bundled-alpha";
 const OPENAI_PRIMARY_RUNTIME_MARKETPLACE_NAME: &str = "openai-primary-runtime";
@@ -58,6 +61,9 @@ pub enum PluginSubcommand {
     /// Add, list, upgrade, or remove configured plugin marketplaces.
     Marketplace(MarketplaceCli),
 
+    /// Run or rerun an installed plugin's explicitly approved setup commands.
+    Setup(SetupPluginArgs),
+
     /// Remove an installed plugin from local config and cache.
     ///
     /// Pass either `PLUGIN@MARKETPLACE` or pass `PLUGIN` with
@@ -80,6 +86,41 @@ pub struct AddPluginArgs {
     marketplace_name: Option<String>,
 
     /// Output install result as JSON.
+    #[arg(long = "json")]
+    json: bool,
+
+    /// Approve and run the plugin's experimental setup plan during installation.
+    #[arg(long = "run-setup")]
+    run_setup: bool,
+
+    /// Supply a non-secret declared setup input as INPUT=VALUE.
+    #[arg(long = "set", value_name = "INPUT=VALUE")]
+    setup_inputs: Vec<String>,
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    bin_name = "codex plugin setup",
+    after_help = "Examples:\n  codex plugin setup sample@debug\n  codex plugin setup sample@debug --yes --set project_root=/path/to/project"
+)]
+pub struct SetupPluginArgs {
+    /// Plugin selector: either PLUGIN@MARKETPLACE or PLUGIN with --marketplace.
+    #[arg(value_name = "PLUGIN[@MARKETPLACE]")]
+    plugin: String,
+
+    /// Marketplace name to use when PLUGIN does not include @MARKETPLACE.
+    #[arg(long = "marketplace", short = 'm', value_name = "MARKETPLACE")]
+    marketplace_name: Option<String>,
+
+    /// Explicitly approve the complete setup plan without an approval prompt.
+    #[arg(long = "yes")]
+    yes: bool,
+
+    /// Supply a non-secret declared setup input as INPUT=VALUE.
+    #[arg(long = "set", value_name = "INPUT=VALUE")]
+    setup_inputs: Vec<String>,
+
+    /// Output the setup result as JSON.
     #[arg(long = "json")]
     json: bool,
 }
@@ -130,12 +171,24 @@ pub async fn run_plugin_add(
         codex_home,
         plugins_input,
         manager,
+        plugin_setup_enabled,
     } = load_plugin_command_context(overrides).await?;
     let AddPluginArgs {
         plugin,
         marketplace_name,
         json,
+        run_setup,
+        setup_inputs,
     } = args;
+    if (run_setup || !setup_inputs.is_empty()) && !plugin_setup_enabled {
+        bail!(
+            "plugin setup is experimental and disabled; enable it with codex features enable plugin_setup"
+        );
+    }
+    #[cfg(not(unix))]
+    if run_setup || !setup_inputs.is_empty() {
+        plugin_setup::ensure_setup_execution_supported()?;
+    }
     let PluginSelection {
         plugin_name,
         marketplace_name,
@@ -148,15 +201,33 @@ pub async fn run_plugin_add(
         &marketplace_name,
         &plugin_name,
     )?;
-    let outcome = manager
-        .install_plugin(
-            &plugins_input.config_layer_stack,
-            PluginInstallRequest {
-                plugin_name,
-                marketplace_path: marketplace.path,
-            },
-        )
-        .await?;
+    let request = PluginInstallRequest {
+        plugin_name,
+        marketplace_path: marketplace.path,
+    };
+    let outcome = if plugin_setup_enabled && cfg!(unix) {
+        match manager
+            .install_plugin_from_foreground_cli(&plugins_input.config_layer_stack, request)
+            .await?
+        {
+            ForegroundPluginInstallOutcome::Installed(outcome) => outcome,
+            ForegroundPluginInstallOutcome::SetupRequired(pending) => {
+                plugin_setup::approve_plugin_setup(
+                    &pending.setup,
+                    pending.installed_path.as_path(),
+                    run_setup,
+                    json,
+                )?;
+                manager.validate_pending_plugin_setup(&pending).await?;
+                plugin_setup::run_plugin_setup(&pending, &setup_inputs, json).await?;
+                manager.activate_plugin_after_setup(pending).await?
+            }
+        }
+    } else {
+        manager
+            .install_plugin(&plugins_input.config_layer_stack, request)
+            .await?
+    };
 
     if json {
         let output = JsonPluginAddOutput::from_outcome(outcome);
@@ -198,6 +269,72 @@ impl JsonPluginAddOutput {
             auth_policy: auth_policy_label(outcome.auth_policy),
         }
     }
+}
+
+pub async fn run_plugin_setup(
+    overrides: Vec<(String, toml::Value)>,
+    args: SetupPluginArgs,
+) -> Result<()> {
+    let PluginCommandContext {
+        plugins_input,
+        manager,
+        plugin_setup_enabled,
+        ..
+    } = load_plugin_command_context(overrides).await?;
+    if !plugin_setup_enabled {
+        bail!(
+            "plugin setup is experimental and disabled; enable it with codex features enable plugin_setup"
+        );
+    }
+    #[cfg(not(unix))]
+    plugin_setup::ensure_setup_execution_supported()?;
+    let SetupPluginArgs {
+        plugin,
+        marketplace_name,
+        yes,
+        setup_inputs,
+        json,
+    } = args;
+    let PluginSelection {
+        plugin_name,
+        marketplace_name,
+        ..
+    } = parse_plugin_selection(plugin, marketplace_name)?;
+    let plugin_id = PluginId::new(plugin_name, marketplace_name)?;
+    let pending = manager
+        .prepare_installed_plugin_setup(&plugins_input.config_layer_stack, plugin_id)
+        .await?;
+    plugin_setup::approve_plugin_setup(
+        &pending.setup,
+        pending.installed_path.as_path(),
+        yes,
+        json,
+    )?;
+    plugin_setup::rerun_installed_plugin_setup(&pending, &setup_inputs, json).await?;
+    let plugin_id = pending.plugin_id.clone();
+    manager.finish_installed_plugin_setup(pending).await?;
+
+    if json {
+        let output = JsonPluginSetupOutput {
+            plugin_id: plugin_id.as_key(),
+            name: plugin_id.plugin_name,
+            marketplace_name: plugin_id.marketplace_name,
+            status: "completed",
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("Plugin setup completed for {}.", plugin_id.as_key());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsonPluginSetupOutput {
+    plugin_id: String,
+    name: String,
+    marketplace_name: String,
+    status: &'static str,
 }
 
 pub async fn run_plugin_list(
@@ -580,6 +717,7 @@ struct PluginCommandContext {
     codex_home: PathBuf,
     plugins_input: PluginsConfigInput,
     manager: PluginsManager,
+    plugin_setup_enabled: bool,
 }
 
 async fn load_plugin_command_context(
@@ -589,6 +727,7 @@ async fn load_plugin_command_context(
     let config = Config::load_with_cli_overrides(overrides)
         .await
         .context("failed to load configuration")?;
+    let plugin_setup_enabled = config.features.enabled(Feature::PluginSetup);
     let plugins_input = config.plugins_config_input();
     let manager = PluginsManager::new(codex_home.to_path_buf());
     manager.set_auth_mode(load_cli_auth_mode(&config).await);
@@ -596,6 +735,7 @@ async fn load_plugin_command_context(
         codex_home: codex_home.to_path_buf(),
         plugins_input,
         manager,
+        plugin_setup_enabled,
     })
 }
 

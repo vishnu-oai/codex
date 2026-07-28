@@ -178,6 +178,8 @@ pub enum Feature {
     ToolSuggest,
     /// Enable plugins.
     Plugins,
+    /// Enable explicitly approved, foreground plugin setup commands.
+    PluginSetup,
     /// Discover selected-root plugin and skill manifests through one high-level exec-server RPC.
     ExecutorCapabilityDiscovery,
     /// Removed compatibility flag for plugin-bundled lifecycle hooks.
@@ -1166,6 +1168,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "plugins",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::PluginSetup,
+        key: "plugin_setup",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::ExecutorCapabilityDiscovery,
